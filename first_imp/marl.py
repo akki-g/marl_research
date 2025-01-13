@@ -48,7 +48,7 @@ class Agent:
     def update(self, delta, phi_s, reward):
 
         self.weights += self.step_size * delta * phi_s
-        self.average_reward += self.step_size * (reward - self.average_reward)
+        self.average_reward = (1 - self.step_size) * self.average_reward + self.step_size * reward
 
     def td_update(self, state, next_state, reward, features):
 
@@ -85,9 +85,9 @@ class DecentralizedMARL:
         
     def train(self, num_rounds):
 
-        for i in range(num_rounds):
+        for i in range(num_rounds): #outer loop: communication rounds
             
-            for k in range(self.K):
+            for k in range(self.K): #inner loop: local TD updates
                 for agent in self.agents:
                     state = np.random.choice(self.num_states)
                     action = np.random.choice(self.env.num_actions)
@@ -109,23 +109,28 @@ class DecentralizedMARL:
         Evaluate the approximate global value function for each state:
         V(s) = ϕ(s)ᵀw
         """
-        avg_weights = [self.feature_matrix.dot(agent.get_weights()) for agent in self.agents]
-        return self.feature_matrix.dot(avg_weights)
+        w_bar = np.mean([agent.get_weights() for agent in self.agents], axis=0)
+        val_func = self.feature_matrix.dot(w_bar)
+        return val_func
+    
+                    
 
 
 # Parameters
-NUM_AGENTS = 250
-NUM_STATES = 5000
-NUM_ACTIONS = 200
-FEATURE_DIM = 250
-STEP_SIZE = 0.1
-K = 20
-NUM_ROUNDS = 75
-
+NUM_AGENTS = 20
+NUM_STATES = 10
+NUM_ACTIONS = 2
+FEATURE_DIM = 5
+STEP_SIZE = 0.005
+K = 50
+NUM_ROUNDS = 100
+NUM_SAMPLES = NUM_AGENTS * NUM_ROUNDS * K
 
 # Initialize and train the MARL system
 marl_system = DecentralizedMARL(NUM_AGENTS, NUM_STATES, NUM_ACTIONS, FEATURE_DIM, STEP_SIZE, K)
 marl_system.train(NUM_ROUNDS)
+
+print(NUM_SAMPLES)
 
 # Evaluate the system
 consensus_error = marl_system.eval_consensus_error()
