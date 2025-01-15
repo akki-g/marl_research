@@ -1,56 +1,109 @@
 import numpy as np
+import matplotlib.pyplot as plt
+
+def a_id(action_vec):
+    """
+    Convert a binary action vector (size N) to a single integer in [0, 2^N-1].
+    """
+    idx = 0
+    for bit in action_vec:
+        idx = idx * 2 + bit
+    return idx
+
+def id_to_vec(idx, N):
+    """
+    Convert an integer idx in [0, 2^N-1] to a binary vector of length N.
+    """
+    a = np.zeros(N, dtype=int)
+    for i in reversed(range(N)):
+        a[i] = idx % 2
+        idx //= 2
+    return a
 
 class MPDEnvironment:
 
-    def __init__(self, num_states, num_actions):
+    def __init__(self, num_states, num_actions, num_agents, seed=42):
+        np.random.seed(seed)
         self.num_states = num_states
-        self.num_actions = num_actions
-        self.transition_matrix = self.get_transition_matrix()
-        self.reward_matrix = self.get_reward_matrix()
+        self.num_actions_local = num_actions
+        self.num_actions_global = num_actions ** num_agents
+        self.num_agents = num_agents
 
+        self.reward_matrix = self.get_reward_matrix()
+        self.transition_matrix = self.get_transition_matrix()
+        self.policy = 0.5 * np.ones((num_agents, num_states, num_actions))
+
+    def get_policy_matrix(self):
+        pi = np.zeros((self.num_agents, self.num_states, self.num_actions_local ))
+        pi[:, :, 0] = 0.5
+        pi[:, :, 1] = 0.5
+        return pi
+    
     def get_transition_matrix(self):
         # Random transition probabilities for state-action pairs
-        matrix = np.random.rand(self.num_states, self.num_actions, self.num_states)
-        return matrix / matrix.sum(axis=1, keepdims=True)  # Normalize to ensure stochasticity
+        P = np.random.rand(self.num_states, self.num_states)
+        # Normalize each row
+        for i in range(self.num_states):
+            row_sum = np.sum(P[i, :])
+            P[i, :] /= row_sum # Normalize to ensure stochasticity
+        return P
     
     def get_reward_matrix(self):
         # Random rewards for state-action pairs
-        return np.random.rand(self.num_states, self.num_actions)
-    
-    def get_policy_matrix(self):
+        R_mean = np.zeros((self.num_agents, self.num_states, self.num_actions_global))
+        for i in range(self.num_agents):
+            for s in range(self.num_states):
+                for a_idx in range(self.num_actions_global):
+                    R_mean[i, s, a_idx] = 4.0 * np.random.rand()
 
-        return np.full((self.num_states, self.num_actions), 1.0/self.num_actions)
-    
-    def sample_actin(self, state):
-        return np.random.choice(self.num_actions, p=self.policy_matrix[state])
-    
+    def step(self, state, joint_action_idx):
+        """
+        Take a step in the environment.
+        """
+        p = self.transition_matrix[state, joint_action_idx]
+        next_state = np.random.choice(self.num_states, p=p)
+        rewards = self.reward_matrix[:, state, joint_action_idx]
+        rewards = rewards + np.random.uniform(-0.5, 0.5, size=(self.num_agents,))
+        return next_state, rewards
 
-    def step(self, state, action):
-        next_state = np.random.choice(self.num_states, p=self.transition_matrix[state, action])
-        reward = self.reward_matrix[state, action] + np.random.uniform(-0.5, 0.5)
-        return next_state, reward
+    def sample_joint_action(self, state):
+        local_actions = []
+        for i in range(self.num_agents):
+            prob = self.policy[i, state]
+            a_i = np.random.choice(self.num_actions_local, p=prob)
+            local_actions.append(a_i)
+        joint_action_idx = a_id(local_actions)
+        return joint_action_idx 
+
     
 
 
 class Agent:
 
-    def __init__(self, agent_id, feature_dim, step_size=0.1, seed=42):
+    def __init__(self, agent_id, feature_dim, gamma, step_size=0.1, seed=42):
+
         np.random.seed(seed + agent_id)  # so each agent can differ slightly
         self.agent_id = agent_id
         self.weights = np.random.rand(feature_dim)
+
         self.average_reward = 0.0
+        self.gamma = gamma
         self.step_size = step_size
     
     def td_error(self, state, next_state, reward, features):
         """
         δ^i_{l,k} = r^i_{l,k+1} - μ^i_{l,k} + φ(s_{l,k+1})^T w^i_{l,k} - φ(s_{l,k})^T w^i_{l,k}
         """
+        """
+        Discounted env
+        δ^i = r^i + γφ(s')ᵀ w - φ(s)ᵀ w
+        """
         phi_s     = features[state]
         phi_s_next= features[next_state]
         v_s       = phi_s.dot(self.weights)      # φ(s)ᵀ w
         v_s_next  = phi_s_next.dot(self.weights) # φ(s')ᵀ w
 
-        delta = reward - self.average_reward + v_s_next - v_s
+        delta = reward + self.gamma*v_s_next - v_s
         return delta, phi_s
     
     def update(self, delta, phi_s, reward):
@@ -73,15 +126,21 @@ class Agent:
     
 class DecentralizedMARL:
     
-    def __init__(self, num_agents, num_states, num_actions, feature_dim, step_size, K):
-        self.env = MPDEnvironment(num_states, num_actions)
+    def __init__(self, num_agents, num_states, num_actions, feature_dim, step_size, K, seed=42):
+
+        self.env = MPDEnvironment(num_states, num_actions, num_agents)
         self.num_agents = num_agents
-        self.agents = [Agent(agent_id, feature_dim, step_size) for agent_id in range(num_agents)]
+        self.agents = [Agent(agent_id, feature_dim, step_size, seed=seed+1000) for agent_id in range(num_agents)]
+
         self.num_states = num_states
-        self.num_actions = num_actions
+        self.num_actions_local = num_actions
+        self.num_actions_global = self.env.num_actions_global
+
         self.phi = self.get_feature_matrix(feature_dim, num_states)
+
         self.K = K # num local TD unpdates
         self.adjacency_matrix = self.get_ring_topology_matrix(num_agents)
+
         self.sample_round = 0
         self.msbe = []
 
@@ -90,19 +149,30 @@ class DecentralizedMARL:
         Create a random feature matrix (ϕ) for the states.
         """
         phi = np.random.rand(num_states, feature_dim)
-        phi = phi / np.linalg.norm(phi, axis=1, keepdims=True)
-        return phi 
+        for s in range(num_states):
+            norm_s = np.linalg.norm(phi[s, :], 2)
+            if norm_s > 0:
+                phi[s, :] /= norm_s
+        return phi
 
 
     def get_ring_topology_matrix(self, num_agents):
-        """
-        Create a ring topology adjacency matrix (A) for the agents.
-        A_ij = 0.5 if agent i is connected to agent j, else 0.
-        """
-        A = np.zeros((num_agents, num_agents))
-        for i in range(num_agents):
-            A[i, (i-1) % num_agents] = 0.5
-            A[i, (i+1) % num_agents] = 0.5
+        # ================================
+        # Setup the network adjacency A
+        # ================================
+        if num_agents > 1:
+            diag_element = 0.4
+            off_diag     = 0.3
+            A = diag_element * np.eye(num_agents)
+            A[0, num_agents - 1] = off_diag
+            A[0, 1]     = off_diag
+            for i in range(1, num_agents - 1):
+                A[i, i - 1] = off_diag
+                A[i, i + 1] = off_diag
+            A[num_agents - 1, 0] = off_diag
+            A[num_agents - 1, num_agents - 2] = off_diag
+        else:
+            A = np.array([[1.0]])
         return A
 
     def communicate(self):
@@ -110,27 +180,41 @@ class DecentralizedMARL:
         Perform the consensus step (Eq. 4 in the paper):
         w_i <- Σ_j A_ij * w_j
         """
-        new_weights = np.zeros_like(self.agents[0].get_weights())
+        current_weights = np.stack([agent.get_weights() for agent in self.agents], axis=1)
+        new_weights = current_weights @ self.adjacency_matrix.T
         for i, agent in enumerate(self.agents):
-            neighbors = np.nonzero(self.adjacency_matrix[i])[0]
-            neighbor_weights = np.sum([self.adjacency_matrix[i, j] * self.agents[j].get_weights() for j in neighbors], axis=0)
-            new_weights += neighbor_weights
-        for agent in self.agents:
-            agent.set_weights(new_weights)
+            agent.set_weights(new_weights[:, i])
 
+    def eval_msbe(self):
+        """
+        Compute the mean squared Bellman error (MSBE
+        """
+        msbe = 0.0
+        samples = 0
+        for i, agent in enumerate(self.agents):
+            for state in range(self.num_states):
+                joint_action_idx = self.env.sample_joint_action(state)
+                next_state, reward = self.env.step(state, joint_action_idx)
+                v_s = self.phi[state].dot(agent.get_weights())
+                v_s_next = self.phi[next_state].dot(agent.get_weights())
+                r_i = reward[i]
 
+                diff = v_s - (r_i + agent.gamma * v_s_next)
+                msbe += diff**2
+                samples += 1
+        return msbe / samples if samples > 0 else 0.0
+    
     def train(self, num_rounds):
 
         for i in range(num_rounds): #outer loop: communication rounds
             for k in range(self.K): #inner loop: local TD updates
+                msbe = self.eval_msbe()
+                self.msbe.append(msbe)
                 for agent in self.agents:
                     state = np.random.choice(self.num_states)
-                    action = self.env.sample_actin(state)
-                    next_state, reward = self.env.step(state, action)
-                    delta = agent.td_update(state, next_state, reward, self.phi)
-                    self.sample_round += 1
-
-
+                    joint_action_idx = self.env.sample_joint_action(state)
+                    next_state, reward = self.env.step(state, joint_action_idx)
+                    agent.td_update(state, next_state, reward[agent.agent_id], self.phi)
             self.communicate()
 
     def eval_consensus_error(self):
@@ -158,19 +242,33 @@ class DecentralizedMARL:
 NUM_AGENTS = 20
 NUM_STATES = 10
 NUM_ACTIONS = 2
+
 TOTAL_ACTION_SPACE = NUM_ACTIONS ** NUM_AGENTS
 FEATURE_DIM = 5
 STEP_SIZE = 0.005
-K = 50
-NUM_ROUNDS = 100
-NUM_SAMPLES = NUM_AGENTS * NUM_ROUNDS * K
+K = [40, 50, 100, 200, 250]
+L = [250, 200, 100, 50, 40]
+
 GAMMA = 0.99
 
-# Initialize and train the MARL system
-marl_system = DecentralizedMARL(NUM_AGENTS, NUM_STATES, NUM_ACTIONS, FEATURE_DIM, STEP_SIZE, K)
-marl_system.train(NUM_ROUNDS)
 
-print("Num Samples: {NUM_SAMPLES}")
+msbes = []
+
+# Initialize and train the MARL system
+for k, l in zip(K, L):
+    marl_system = DecentralizedMARL(NUM_AGENTS, NUM_STATES, NUM_ACTIONS, FEATURE_DIM, STEP_SIZE, k)
+    marl_system.train(l)
+    msbes.append(marl_system.msbe)
+    # Evaluate the system
+    consensus_error = marl_system.eval_consensus_error()
+    value_function = marl_system.eval_value_function()
+
+    print(f"K={k}, L={l}")
+    print(f"Consensus Error: {consensus_error}")
+    print("Global Value Function (V(s)) for each state:")
+    print(value_function)
+    print()
+
 
 # Evaluate the system
 consensus_error = marl_system.eval_consensus_error()
@@ -179,3 +277,12 @@ value_function = marl_system.eval_value_function()
 print(f"Consensus Error: {consensus_error}")
 print("Global Value Function (V(s)) for each state:")
 print(value_function)
+
+# Plot the MSBE
+plt.figure()
+for i, msbe in enumerate(msbes):
+    plt.plot(msbe, label=f"K={K[i]}, L={L[i]}")
+plt.xlabel("Communication Rounds")
+plt.ylabel("MSBE")
+plt.legend()
+plt.show()
