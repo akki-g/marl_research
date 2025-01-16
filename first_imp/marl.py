@@ -81,7 +81,7 @@ class MPDEnvironment:
 
 class Agent:
 
-    def __init__(self, agent_id, feature_dim, gamma, step_size=0.1, seed=42):
+    def __init__(self, agent_id, feature_dim, gamma, step_size=0.005, seed=42):
 
         np.random.seed(seed + agent_id)  # so each agent can differ slightly
         self.agent_id = agent_id
@@ -127,11 +127,11 @@ class Agent:
     
 class DecentralizedMARL:
     
-    def __init__(self, num_agents, num_states, num_actions, feature_dim, step_size, K, seed=42):
+    def __init__(self, num_agents, num_states, num_actions, feature_dim, step_size, K, gamma, seed=42):
 
         self.env = MPDEnvironment(num_states, num_actions, num_agents)
         self.num_agents = num_agents
-        self.agents = [Agent(agent_id, feature_dim, step_size, seed=seed+1000) for agent_id in range(num_agents)]
+        self.agents = [Agent(agent_id, feature_dim, gamma, step_size, seed=seed+1000) for agent_id in range(num_agents)]
 
         self.num_states = num_states
         self.num_actions_local = num_actions
@@ -141,8 +141,7 @@ class DecentralizedMARL:
 
         self.K = K # num local TD unpdates
         self.adjacency_matrix = self.get_ring_topology_matrix(num_agents)
-
-        self.sample_round = 0
+        self.gamma = gamma
         self.msbe = []
         self.mse = []
         self.w_star = self.compute_w_star()
@@ -200,10 +199,26 @@ class DecentralizedMARL:
         dist_vec /= np.sum(dist_vec)
         diag_dist = np.diag(dist_vec)
 
+        num_states = self.num_states
+        num_agents = self.num_agents
         r_s = np.zeros(self.num_states)
-        for s in range(self.num_states):
-            r_all = np.mean(self.env.reward_matrix[:, s, :])
-            r_s[s] = r_all
+        for s in range(num_states):
+            sum_for_s = 0.0
+
+            for a_id in range(self.num_actions_global):
+                a_vec = id_to_vec(a_id, num_agents)
+
+                p_a = 1.0
+                for i in range(num_agents):
+                    p_a *= self.env.policy[i, s, a_vec[i]]
+                
+                r_bar = 0.0
+                for i in range(num_agents):
+                    r_bar += (1.0 / num_agents) * self.env.reward_matrix[i, s, a_id]
+                
+                sum_for_s += p_a * r_bar
+            r_s[s] = sum_for_s 
+        
         
         phi_T_dist = self.phi.T @ diag_dist
         P_phi = P @ self.phi
@@ -216,9 +231,11 @@ class DecentralizedMARL:
         """
         Compute the mean squared error (MSE) between the optimal weights w* and the agents' weights.
         """
+        w_star = self.w_star
         w_matrix = np.stack([agent.get_weights() for agent in self.agents], axis=1)  # (d, N)
-        diff = w_matrix - self.w_star[:, None]
-        return np.mean(diff**2)
+        diff = w_matrix - w_star[:, None]
+        mse = np.mean(diff**2)
+        return mse
     
     def eval_msbe(self):
         """
@@ -241,6 +258,7 @@ class DecentralizedMARL:
     
     def train(self, num_rounds):
 
+        s = np.random.randint(self.num_states)
         for i in range(num_rounds): #outer loop: communication rounds
             for k in range(self.K): #inner loop: local TD updates
                 msbe = self.eval_msbe()
@@ -248,11 +266,14 @@ class DecentralizedMARL:
 
                 mse = self.eval_mse()
                 self.mse.append(mse)
-                for agent in self.agents:
-                    state = np.random.choice(self.num_states)
-                    joint_action_idx = self.env.sample_joint_action(state)
-                    next_state, reward = self.env.step(state, joint_action_idx)
-                    agent.td_update(state, next_state, reward[agent.agent_id], self.phi)
+                joint_action_idx = self.env.sample_joint_action(s)
+                next_state, rewards = self.env.step(s, joint_action_idx)
+                for idx, agent in enumerate(self.agents):
+                    agent.td_update(state=s,
+                                next_state=next_state,
+                                reward=rewards[idx],
+                                features=self.phi)
+                s = next_state
             self.communicate()
 
     def eval_consensus_error(self):
@@ -295,7 +316,7 @@ mses = []
 
 # Initialize and train the MARL system
 for k, l in zip(K, L):
-    marl_system = DecentralizedMARL(NUM_AGENTS, NUM_STATES, NUM_ACTIONS, FEATURE_DIM, STEP_SIZE, k)
+    marl_system = DecentralizedMARL(NUM_AGENTS, NUM_STATES, NUM_ACTIONS, FEATURE_DIM, STEP_SIZE, k, GAMMA)
     marl_system.train(l)
     msbes.append(marl_system.msbe)
     mses.append(marl_system.mse)
@@ -313,7 +334,8 @@ for k, l in zip(K, L):
 # Plot the MSBE
 plt.figure()
 for i, msbe in enumerate(msbes):
-    plt.plot(msbe, label=f"K={K[i]}, L={L[i]}")
+    x_vals = range(1, K[i]*L[i]+1)
+    plt.plot(x_vals, msbe, label=f"K={K[i]}, L={L[i]}")
 plt.xlabel("Communication Rounds")
 plt.ylabel("MSBE")
 plt.legend()
@@ -322,7 +344,8 @@ plt.show()
 
 plt.figure()
 for i, mse in enumerate(mses):
-    plt.plot(mse, label=f"K={K[i]}, L={L[i]}")
+    x_vals = range(1, K[i]*L[i]+1)
+    plt.plot(x_vals, mse, label=f"K={K[i]}, L={L[i]}")
 plt.xlabel("Communication Rounds")
 plt.ylabel("Objective Error")
 plt.legend()
