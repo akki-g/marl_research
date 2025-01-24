@@ -266,6 +266,7 @@ class DecentralizedMARL:
 
                 mse = self.eval_mse()
                 self.mse.append(mse)
+                print(f"Round {i+1}, Local Update {k+1}, MSBE: {msbe}, MSE: {mse}")
                 joint_action_idx = self.env.sample_joint_action(s)
                 next_state, rewards = self.env.step(s, joint_action_idx)
                 for idx, agent in enumerate(self.agents):
