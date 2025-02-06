@@ -1,0 +1,6 @@
+numpy
+pettingzoo
+matplotlib
+scipy
+pygame
+torch

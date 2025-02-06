@@ -3,8 +3,8 @@ import numpy as np
 import torch
 
 
-env = cooperative_pong_v5.parallel_env()
-env.reset(seed=42)
+env = cooperative_pong_v5.parallel_env(render_mode="human")
+observations, infos = env.reset(seed=42)
 
 
 
@@ -14,10 +14,11 @@ class Agent:
         self.w = np.random.randn(feat_dim) * 0.1
         self.beta = beta
         self.mu = 0.0
+        self.feature_dim = feat_dim
 
     def get_features(self, observation):
-        feat = np.mean(observation, axis=(0, 1))
-        return feat
+        reshaped_obs = observation.reshape((-1, self.feature_dim))
+        return np.mean(reshaped_obs, axis=0)
     
     def update(self, phi, phi_next, reward):
         td_error = reward - self.mu + phi_next.dot(self.w) - phi.dot(self.w)
@@ -43,7 +44,7 @@ def compute_msbe(agents, phi, phi_next, rewards):
     return np.mean(squared_errors)
 
 
-agent_ids = env.agents
+agent_ids = env.possible_agents
 num_agents = len(agent_ids)
 
 
@@ -52,7 +53,7 @@ beta = 0.01
 
 agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
 
-A = np.ones(num_agents, num_agents) / num_agents    # Weight matrix for consensus step
+A = np.ones((num_agents, num_agents)) / num_agents    # Weight matrix for consensus step
 
 K = 50
 L = 200
@@ -63,35 +64,35 @@ consenesus_errors = []
 msbes = []
 
 for l in range(L):
-
+    observations, infos = env.reset()
+    env.render()
     for k in range(K):
+        actions = {}
+        active_agents = [agent.id for agent in agents if agent.id in observations]
+        for agent_id in active_agents:
+            agent = next(a for a in agents if a.id == agent_id)
+            phi = agent.get_features(observations[agent.id])
+            actions[agent.id] = env.action_space(agent.id).sample()
+        next_observations, rewards, terminations, truncations, infos = env.step(actions)
+        for agent in agents:
+            if agent.id in next_observations:
+                phi = agent.get_features(observations[agent.id])
+                phi_next = agent.get_features(next_observations[agent.id])
+                agent.update(phi, phi_next, rewards[agent.id])
+        observations = next_observations
 
-        for i, agent in enumerate(agents):
-            obs, reward, term, trun, info = env.last()
-            agent_idx = agent_ids.index(agent.id)
+        if all(terminations.values()) or all(truncations.values()):
+            break
 
-            if term or trun:
-                continue
-            else:
-                phi = agent.get_features(obs)
-                action = np.random(range(env.action_spaces(agent).n))
-            env.step(action)
-
-            next_obs, _, _, _, _ = env.last()
-            phi_next = agent.get_features(next_obs)
-
-            td_error = agent.update(phi, phi_next, reward)
-
-        msbe_samples = []
-        for i in range(num_agents):
-            phi_sample = agents[i].get_features(obs)
-            phi_next_sample = agents[i].get_features(next_obs)
-            msbe_samples.append(reward)
-        current_msbe = compute_msbe(agents, phi_sample, phi_next_sample, msbe_samples)
-        msbes.append(current_msbe)
-
+        active_ids = [agent.id for agent in agents if agent.id in observations]
+        if active_ids:
+            sample_agent = next(a for a in agents if a.id == active_ids[0])
+            phi_sample = sample_agent.get_features(observations[active_ids[0]])
+            phi_next_sample = sample_agent.get_features(observations[active_ids[0]])
+            current_msbe = compute_msbe(agents, phi_sample, phi_next_sample, rewards[active_ids[0]])
+            msbes.append(current_msbe)
+            
         consensus_update(agents, A)
-        print(f"After consensus round {l+1}/{L}, last MSBE = {msbes[-1]:.5f}")
         
 env.close()
 # Plot MSBE
