@@ -48,10 +48,15 @@ def consensus_update(agents, A):
 def compute_msbe(agents, phi, phi_next, rewards):
     """Compute Mean Squared Bellman Error"""
     errors = []
-    reward_tensor = torch.tensor(rewards, device=device)
-    for agent in agents:
-        error = reward_tensor - agent.mu + torch.dot(phi_next, agent.w) - torch.dot(phi, agent.w)
-        errors.append(error ** 2)
+    reward_tensor = torch.tensor(
+        [rewards.get(agent.id, 0.0) for agent in agents],
+        device=device
+    )
+    for i, agent in enumerate(agents):
+        phi_i = phi[agent.id]
+        phi_next_i = phi_next[agent.id]
+        td_error = reward_tensor[i] - agent.mu + torch.dot(phi_next_i, agent.w) - torch.dot(phi_i, agent.w)
+        errors.append(td_error ** 2)
     return torch.mean(torch.stack(errors)).cpu().item()
 
 
@@ -59,8 +64,8 @@ agent_ids = env.possible_agents
 num_agents = len(agent_ids)
 
 
-feat_dim = 256
-beta = 0.01
+feat_dim = 5
+beta = 0.005
 
 agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
 
@@ -90,13 +95,13 @@ consenesus_errors = []
 
 
 msbes = []
-
+i = 0
 for l in range(L):
     observations, infos = env.reset()
     for k in range(K):
         actions = {agent.id: agent.policy(observations[agent.id]) for agent in agents if agent.id in observations}
         next_observations, rewards, term, trunc, infos = env.step(actions)
-        for agent_id in observations.key():
+        for agent_id in observations.keys():
             agent = next(a for a in agents if a.id == agent_id)
             phi = agent.get_features(observations[agent_id])
             phi_next = agent.get_features(next_observations[agent_id])
@@ -106,13 +111,14 @@ for l in range(L):
         
         if all(term.values()) or all(trunc.values()):
             break
-
-    consensus_update(agents, A)
-    current_msbe = compute_msbe(agents, 
+        current_msbe = compute_msbe(agents, 
                                 {agent.id: agent.get_features(observations[agent.id]) for agent in agents if agent.id in observations},
                                 {agent.id: agent.get_features(next_observations[agent.id]) for agent in agents if agent.id in next_observations},
                                 rewards)
-    msbes.append(current_msbe)
+        msbes.append(current_msbe)
+        i+=1
+        print(f"Sample number {i}, MSBE: {current_msbe}") 
+    consensus_update(agents, A)
 
         
 env.close()
