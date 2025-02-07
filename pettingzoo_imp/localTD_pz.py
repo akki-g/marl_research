@@ -29,6 +29,11 @@ class Agent:
         self.w += self.beta * td_error * phi
         self.mu = (1 - self.beta) * self.mu + self.beta * reward_tensor 
         return td_error.cpu().numpy()
+    
+    def policy(self, observation):
+        phi = self.get_features(observation)
+        action_values = torch.dot(self.w, phi)
+        return torch.argmax(action_values).item()
 
 
 def consensus_update(agents, A):
@@ -59,8 +64,25 @@ beta = 0.01
 
 agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
 
-A = torch.ones(num_agents, num_agents, device=device) / num_agents    # Weight matrix for consensus step
+if num_agents > 1:
+    diag_element = 0.4
+    off_diag = 0.3
+    # Create an identity matrix scaled by the diagonal weight
+    A = diag_element * torch.eye(num_agents, device=device)
+    
+    # Set neighbor connections for a circular (ring) topology
+    A[0, num_agents - 1] = off_diag  # last neighbor of first node
+    A[0, 1] = off_diag               # second neighbor of first node
+    
+    for i in range(1, num_agents - 1):
+        A[i, i - 1] = off_diag       # left neighbor
+        A[i, i + 1] = off_diag       # right neighbor
 
+    A[num_agents - 1, 0] = off_diag      # first neighbor of last node
+    A[num_agents - 1, num_agents - 2] = off_diag  # second neighbor of last node
+else:
+    A = torch.tensor([[1.0]], device=device)
+    
 K = 50
 L = 200
 
@@ -72,33 +94,26 @@ msbes = []
 for l in range(L):
     observations, infos = env.reset()
     for k in range(K):
-        actions = {}
-        active_agents = [agent.id for agent in agents if agent.id in observations]
-        for agent_id in active_agents:
+        actions = {agent.id: agent.policy(observations[agent.id]) for agent in agents if agent.id in observations}
+        next_observations, rewards, term, trunc, infos = env.step(actions)
+        for agent_id in observations.key():
             agent = next(a for a in agents if a.id == agent_id)
-            phi = agent.get_features(observations[agent.id])
-            actions[agent.id] = env.action_space(agent.id).sample()
-        next_observations, rewards, terminations, truncations, infos = env.step(actions)
-        for agent in agents:
-            if agent.id in next_observations:
-                phi = agent.get_features(observations[agent.id])
-                phi_next = agent.get_features(next_observations[agent.id])
-                agent.update(phi, phi_next, rewards[agent.id])
-        observations = next_observations
+            phi = agent.get_features(observations[agent_id])
+            phi_next = agent.get_features(next_observations[agent_id])
+            td_error = agent.update(phi, phi_next, rewards[agent_id])
 
-        if all(terminations.values()) or all(truncations.values()):
+        observations = next_observations
+        
+        if all(term.values()) or all(trunc.values()):
             break
 
-        active_ids = [agent.id for agent in agents if agent.id in observations]
-        if active_ids:
-            sample_agent = next(a for a in agents if a.id == active_ids[0])
-            phi_sample = sample_agent.get_features(observations[active_ids[0]])
-            phi_next_sample = sample_agent.get_features(observations[active_ids[0]])
-            current_msbe = compute_msbe(agents, phi_sample, phi_next_sample, rewards[active_ids[0]])
-            msbes.append(current_msbe)
-            
-        consensus_update(agents, A)
-        print(f"Local TD Update Step: {k}, MSBE: {current_msbe}")
+    consensus_update(agents, A)
+    current_msbe = compute_msbe(agents, 
+                                {agent.id: agent.get_features(observations[agent.id]) for agent in agents if agent.id in observations},
+                                {agent.id: agent.get_features(next_observations[agent.id]) for agent in agents if agent.id in next_observations},
+                                rewards)
+    msbes.append(current_msbe)
+
         
 env.close()
 # Plot MSBE
