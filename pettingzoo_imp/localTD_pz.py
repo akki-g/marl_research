@@ -2,46 +2,52 @@ from pettingzoo.butterfly import cooperative_pong_v5
 import numpy as np
 import torch
 
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+torch.set_default_dtype(torch.float32)
+print("Using device:", device)
 
 env = cooperative_pong_v5.parallel_env(render_mode="human")
 observations, infos = env.reset(seed=42)
 
 
-
 class Agent:
     def __init__(self, agent_id, feat_dim, beta):
         self.id = agent_id
-        self.w = np.random.randn(feat_dim) * 0.1
+        self.w = torch.randn(feat_dim, device=device) * 0.1
         self.beta = beta
-        self.mu = 0.0
+        self.mu = torch.tensor(0.0, device=device)
         self.feature_dim = feat_dim
 
     def get_features(self, observation):
-        reshaped_obs = observation.reshape((-1, self.feature_dim))
-        return np.mean(reshaped_obs, axis=0)
+        obs_tensor = torch.tensor(observation, device=device, dtype=torch.float32)
+        reshaped_obs = obs_tensor.view(-1, self.feature_dim)
+        return torch.mean(reshaped_obs, dim=0)
     
     def update(self, phi, phi_next, reward):
-        td_error = reward - self.mu + phi_next.dot(self.w) - phi.dot(self.w)
+        reward_tensor = torch.tensor(reward, device=device)
+        td_error = reward_tensor - self.mu + torch.dot(phi_next, self.w) - torch.dot(phi, self.w)
         self.w += self.beta * td_error * phi
-        self.mu = (1 - self.beta) * self.mu + self.beta * reward
-        return td_error
+        self.mu = (1 - self.beta) * self.mu + self.beta * reward_tensor 
+        return td_error.cpu().numpy()
 
 
 def consensus_update(agents, A):
     """Perform consensus step using weight matrix A"""
-    all_w = np.array([agent.w for agent in agents])
-    new_w = A @ all_w
-    for i, agent in enumerate(agents):
-        agent.w = new_w[i]
+    with torch.no_grad():
+        all_w = torch.stack([agent.w for agent in agents])
+        new_w = torch.matmul(A, all_w)
+        for i, agent in enumerate(agents):
+            agent.w = new_w[i]
+
 
 def compute_msbe(agents, phi, phi_next, rewards):
     """Compute Mean Squared Bellman Error"""
-    squared_errors = []
+    errors = []
+    reward_tensor = torch.tensor(rewards, device=device)
     for agent in agents:
-        error = rewards - agent.mu + phi_next.dot(agent.w) - phi.dot(agent.w)
-        squared_errors.append(error ** 2)
-
-    return np.mean(squared_errors)
+        error = reward_tensor - agent.mu + torch.dot(phi_next, agent.w) - torch.dot(phi, agent.w)
+        errors.append(error ** 2)
+    return torch.mean(torch.stack(errors)).cpu().item()
 
 
 agent_ids = env.possible_agents
@@ -53,7 +59,7 @@ beta = 0.01
 
 agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
 
-A = np.ones((num_agents, num_agents)) / num_agents    # Weight matrix for consensus step
+A = torch.ones(num_agents, num_agents, device=device) / num_agents    # Weight matrix for consensus step
 
 K = 50
 L = 200
@@ -65,7 +71,6 @@ msbes = []
 
 for l in range(L):
     observations, infos = env.reset()
-    env.render()
     for k in range(K):
         actions = {}
         active_agents = [agent.id for agent in agents if agent.id in observations]
@@ -93,6 +98,7 @@ for l in range(L):
             msbes.append(current_msbe)
             
         consensus_update(agents, A)
+        print(f"Local TD Update Step: {k}, MSBE: {current_msbe}")
         
 env.close()
 # Plot MSBE
