@@ -13,27 +13,37 @@ observations, infos = env.reset(seed=42)
 
 
 class Agent:
-    def __init__(self, agent_id, feat_dim, beta):
+    def __init__(self, agent_id, feat_dim, beta, obs_dim, act_dim):
         self.id = agent_id
         self.w = torch.randn(feat_dim, device=device) * 0.1
         self.beta = beta
         self.mu = torch.tensor(0.0, device=device)
         self.feature_dim = feat_dim
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.phi = torch.randn(feat_dim, obs_dim, device=device) * 0.1
+        self.normailze_phi()
+
+    def normailze_phi(self):
+        for s in range(self.obs_dim):
+            norm_s = torch.linalg.norm(self.phi[:, s])
+            if norm_s > 0:
+                self.phi[:, s] /= norm_s
 
     def get_features(self, observation):
-        obs_tensor = torch.tensor(observation, device=device, dtype=torch.float32)
-        projection_matrix = torch.randn(self.feature_dim, obs_tensor.numel(), device=device)
-        return torch.matmul(projection_matrix, obs_tensor.float())
+        obs_tensor = torch.tensor(observation, device=device, dtype=torch.float32).flatten()
+        return torch.matmul(self.phi, obs_tensor)
     
     def update(self, phi, phi_next, reward):
-        reward_tensor = torch.tensor(reward, device=device)
-        td_error = reward_tensor - self.mu + torch.dot(phi_next, self.w) - torch.dot(phi, self.w)
+        td_error = reward - self.mu + torch.dot(phi_next, self.w) - torch.dot(phi, self.w)
         self.w += self.beta * td_error * phi
-        self.mu = (1 - self.beta) * self.mu + self.beta * reward_tensor 
-        return td_error.cpu().numpy()
+        self.mu = (1 - self.beta) * self.mu + self.beta * reward
+        return td_error
     
-    def policy(self):
-        return np.random.randint(0, env.action_space(agent.id).n)
+    def policy(self, observation):
+        features = self.get_features(observation[self.id])
+        action_probs = torch.sigmoid(torch.dot(self.w, features))
+        return torch.multinomial(action_probs, 1).item()
     
 class ReplayBuffer:
     def __init__(self, capacity=1000):
@@ -91,8 +101,10 @@ num_agents = len(agent_ids)
 
 feat_dim = 5
 beta = 0.005
-
-agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
+obs_dim = np.prod(env.observation_space(agent_ids[0]).shape)
+act_dim = env.action_space(agent_ids[0]).n
+print("Observation dimension:", obs_dim)
+agents = [Agent(agent_id, feat_dim, beta, obs_dim, act_dim) for agent_id in agent_ids]
 
 A = torch.zeros((num_agents, num_agents), device=device)
 for i in range(num_agents):
@@ -101,7 +113,6 @@ for i in range(num_agents):
     A[i, i] = 0.4
 
 A = A / A.sum(dim=1, keepdim=True)
-A = A / A.sum(dim=0, keepdim=True)
     
 K = 50
 L = 200
@@ -111,37 +122,28 @@ replay_buff = ReplayBuffer()
 
 msbes = []
 i = 0
-for l in range(L):
-    observations, infos = env.reset()
-  
-    for k in range(K):
-        actions = {a.id: a.policy(obs) for a, obs in    zip(agents, observations.items())}
-        next_observations, rewards, dones, _ = env.step(actions)
-        for agent in agents:
-            if agent.id in observations:
-                state = observations[agent.id].flatten()
-                next_state = next_observations[agent.id].flatten()
-                replay_buff.add(state, actions[agent.id], rewards.get(agent.id, 0.0), next_state)
-
-        observations = next_observations
-
-        for _ in range(K):
-            states, actions, rewards, next_states = replay_buff.sample(batch_size=32)
-
-            states = torch.matmul(torch.randn(feat_dim, states.shape[1], device=device), states.T).T
-            next_states = torch.matmul(torch.randn(feat_dim, next_states.shape[1], device=device), next_states.T).T
-
-            batch_msbes = []
-            for i, agent in enumerate(agents):
-                phi = states[:, i+feat_dim].mean(dim=0)
-                phi_next = next_states[:, i+feat_dim].mean(dim=0)
-                rewards = rewards[:, i].mean()
-                batch_msbes.append(agent.update(phi, phi_next, rewards))
-            
-            msbes.append(torch.mean(batch_msbes))
-            i += 1
-            print(f"Step {i + 1}, MSBE: {msbes[-1]}")
+for l in range(L):  
     
+    for k in range(K):
+        td_sq = []
+        actions = {a.id: a.policy() for a, obs in    zip(agents, observations.items())}
+
+        next_observations, rewards, term, trunc, infos = env.step(actions)
+
+        for agent_id in observations.keys():
+            agent = next(a for a in agents if a.id == agent_id)
+            phi = agent.get_features(observations[agent_id])
+            phi_next = agent.get_features(next_observations[agent_id])
+
+            td_error = agent.update(phi, phi_next, rewards[agent_id])
+            td_sq.append(td_error ** 2)
+        
+        msbes.append(torch.mean(torch.stack(td_sq)).cpu().item())
+        i += 1
+        print(f"Step {i}, MSBE: {msbes[-1]}")
+        if all(term.values()) or all(trunc.values()):
+            break
+        observations = next_observations
     consensus_update(agents, A)
 
 
