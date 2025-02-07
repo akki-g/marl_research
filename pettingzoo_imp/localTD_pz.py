@@ -1,6 +1,8 @@
 from pettingzoo.butterfly import cooperative_pong_v5
 import numpy as np
 import torch
+from collections import deque
+import random
 
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 torch.set_default_dtype(torch.float32)
@@ -20,8 +22,8 @@ class Agent:
 
     def get_features(self, observation):
         obs_tensor = torch.tensor(observation, device=device, dtype=torch.float32)
-        reshaped_obs = obs_tensor.view(-1, self.feature_dim)
-        return torch.mean(reshaped_obs, dim=0)
+        projection_matrix = torch.randn(self.feature_dim, obs_tensor.numel(), device=device)
+        return torch.matmul(projection_matrix, obs_tensor.float())
     
     def update(self, phi, phi_next, reward):
         reward_tensor = torch.tensor(reward, device=device)
@@ -30,19 +32,42 @@ class Agent:
         self.mu = (1 - self.beta) * self.mu + self.beta * reward_tensor 
         return td_error.cpu().numpy()
     
-    def policy(self, observation):
-        phi = self.get_features(observation)
-        action_values = torch.dot(self.w, phi)
-        return torch.argmax(action_values).item()
-
+    def policy(self):
+        return np.random.randint(0, env.action_space(agent.id).n)
+    
+class ReplayBuffer:
+    def __init__(self, capacity=1000):
+        self.buffer = deque(maxlen=capacity)
+    
+    def add(self, s, a, r, s_next):
+        self.buffer.append((
+            torch.tensor(s, device=device).flatten(),
+            a,
+            r,
+            torch.tensor(s_next, device=device).flatten()
+        ))
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
+        states, actions, rewards, next_states = zip(*batch)
+        return (
+            torch.stack(states),
+            torch.tensor(actions, device=device),
+            torch.tensor(rewards, device=device),
+            torch.stack(next_states)
+        )
 
 def consensus_update(agents, A):
     """Perform consensus step using weight matrix A"""
     with torch.no_grad():
         all_w = torch.stack([agent.w for agent in agents])
+        all_mu = torch.stack([agent.mu for agent in agents])
+
         new_w = torch.matmul(A, all_w)
+        new_mu = torch.matmul(A, all_mu)
+
         for i, agent in enumerate(agents):
             agent.w = new_w[i]
+            agent.mu = new_mu[i]
 
 
 def compute_msbe(agents, phi, phi_next, rewards):
@@ -69,56 +94,57 @@ beta = 0.005
 
 agents = [Agent(agent_id, feat_dim, beta) for agent_id in agent_ids]
 
-if num_agents > 1:
-    diag_element = 0.4
-    off_diag = 0.3
-    # Create an identity matrix scaled by the diagonal weight
-    A = diag_element * torch.eye(num_agents, device=device)
-    
-    # Set neighbor connections for a circular (ring) topology
-    A[0, num_agents - 1] = off_diag  # last neighbor of first node
-    A[0, 1] = off_diag               # second neighbor of first node
-    
-    for i in range(1, num_agents - 1):
-        A[i, i - 1] = off_diag       # left neighbor
-        A[i, i + 1] = off_diag       # right neighbor
+A = torch.zeros((num_agents, num_agents), device=device)
+for i in range(num_agents):
+    neighbors = [(i-1)%num_agents, (i+1)%num_agents]
+    A[i, neighbors] = 0.3
+    A[i, i] = 0.4
 
-    A[num_agents - 1, 0] = off_diag      # first neighbor of last node
-    A[num_agents - 1, num_agents - 2] = off_diag  # second neighbor of last node
-else:
-    A = torch.tensor([[1.0]], device=device)
+A = A / A.sum(dim=1, keepdim=True)
+A = A / A.sum(dim=0, keepdim=True)
     
 K = 50
 L = 200
 
 consenesus_errors = []
-
+replay_buff = ReplayBuffer()
 
 msbes = []
 i = 0
 for l in range(L):
     observations, infos = env.reset()
+  
     for k in range(K):
-        actions = {agent.id: agent.policy(observations[agent.id]) for agent in agents if agent.id in observations}
-        next_observations, rewards, term, trunc, infos = env.step(actions)
-        for agent_id in observations.keys():
-            agent = next(a for a in agents if a.id == agent_id)
-            phi = agent.get_features(observations[agent_id])
-            phi_next = agent.get_features(next_observations[agent_id])
-            td_error = agent.update(phi, phi_next, rewards[agent_id])
+        actions = {a.id: a.policy(obs) for a, obs in    zip(agents, observations.items())}
+        next_observations, rewards, dones, _ = env.step(actions)
+        for agent in agents:
+            if agent.id in observations:
+                state = observations[agent.id].flatten()
+                next_state = next_observations[agent.id].flatten()
+                replay_buff.add(state, actions[agent.id], rewards.get(agent.id, 0.0), next_state)
 
         observations = next_observations
-        
-        if all(term.values()) or all(trunc.values()):
-            break
-        current_msbe = compute_msbe(agents, 
-                                {agent.id: agent.get_features(observations[agent.id]) for agent in agents if agent.id in observations},
-                                {agent.id: agent.get_features(next_observations[agent.id]) for agent in agents if agent.id in next_observations},
-                                rewards)
-        msbes.append(current_msbe)
-        i+=1
-        print(f"Sample number {i}, MSBE: {current_msbe}") 
+
+        for _ in range(K):
+            states, actions, rewards, next_states = replay_buff.sample(batch_size=32)
+
+            states = torch.matmul(torch.randn(feat_dim, states.shape[1], device=device), states.T).T
+            next_states = torch.matmul(torch.randn(feat_dim, next_states.shape[1], device=device), next_states.T).T
+
+            batch_msbes = []
+            for i, agent in enumerate(agents):
+                phi = states[:, i+feat_dim].mean(dim=0)
+                phi_next = next_states[:, i+feat_dim].mean(dim=0)
+                rewards = rewards[:, i].mean()
+                batch_msbes.append(agent.update(phi, phi_next, rewards))
+            
+            msbes.append(torch.mean(batch_msbes))
+            i += 1
+            print(f"Step {i}, MSBE: {msbes[-1]}")
+    
     consensus_update(agents, A)
+
+
 
         
 env.close()
