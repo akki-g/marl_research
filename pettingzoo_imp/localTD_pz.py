@@ -140,7 +140,7 @@ for l in range(L):
             
             msbes.append(torch.mean(batch_msbes))
             i += 1
-            print(f"Step {i}, MSBE: {msbes[-1]}")
+            print(f"Step {i + 1}, MSBE: {msbes[-1]}")
     
     consensus_update(agents, A)
 
