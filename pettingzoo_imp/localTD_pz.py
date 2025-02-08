@@ -25,8 +25,10 @@ class Agent:
 
         self.normailze_phi()
 
+        self.theta = torch.randn(act_dim, feat_dim, device=device) * 0.1
+
     def normailze_phi(self):
-        for s in range(self.obs_dim):
+        for s in range(self.phi.shape[1]):
             norm_s = torch.linalg.norm(self.phi[:, s])
             if norm_s > 0:
                 self.phi[:, s] /= norm_s
@@ -39,29 +41,24 @@ class Agent:
     def update(self, phi, phi_next, reward):
         td_error = reward - self.mu + torch.dot(phi_next, self.w) - torch.dot(phi, self.w)
         self.w += self.beta * td_error * phi
-        torch.nn.utils.clip_grad_norm_([self.w], max_norm=0.5)
         self.mu = (1 - self.beta) * self.mu + self.beta * reward
         return td_error
     
     def policy(self, observation):
         features = self.get_features(observation)
-        action_probs = torch.softmax(torch.dot(self.w, features), dim=-1)
-        if action_probs.dim() == 0:
-            action_probs = action_probs.unsqueeze(0)
+        logits = torch.matmul(self.theta, features)
+        action_probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(action_probs, 1).item()
 
 def consensus_update(agents, A):
     """Perform consensus step using weight matrix A"""
     with torch.no_grad():
         all_w = torch.stack([agent.w for agent in agents])
-        all_mu = torch.stack([agent.mu for agent in agents])
 
         new_w = torch.matmul(A, all_w)
-        new_mu = torch.matmul(A, all_mu)
 
         for i, agent in enumerate(agents):
             agent.w = new_w[i]
-            agent.mu = new_mu[i]
 
 
 def compute_msbe(agents, phi, phi_next, rewards):
@@ -83,7 +80,7 @@ agent_ids = env.possible_agents
 num_agents = len(agent_ids)
 
 
-feat_dim = 5
+feat_dim = 32
 beta = 0.001
 obs_dim = np.prod(env.observation_space(agent_ids[0]).shape)
 act_dim = env.action_space(agent_ids[0]).n
@@ -91,12 +88,11 @@ print("Observation dimension:", obs_dim)
 agents = [Agent(agent_id, feat_dim, beta, obs_dim, act_dim) for agent_id in agent_ids]
 
 A = torch.zeros((num_agents, num_agents))
-degree = 2  # For ring topology
 for i in range(num_agents):
     neighbors = [(i-1)%num_agents, (i+1)%num_agents]
-    A[i, neighbors] = 1/(degree+1)
-    A[i,i] = 1/(degree+1)
-A = A.to(device)
+    A[i, neighbors] = 0.3
+    A[i,i] = 0.4
+A = A / A.sum(dim=1, keepdim=True)
 print("A matrix row sums:", A.sum(dim=1))    
 K = 50
 L = 200
@@ -105,33 +101,36 @@ consenesus_errors = []
 
 msbes = []
 i = 0
-observations, infos = env.reset()
+observations, _ = env.reset()
 for l in range(L):  
-    
     for k in range(K):
-        td_sq = []
+        
         actions = {a.id: a.policy(observations[a.id]) for a in agents}
-
         next_observations, rewards, term, trunc, infos = env.step(actions)
 
-        for agent_id in env.agents:
-            agent = next(a for a in agents if a.id == agent_id)
-            phi = agent.get_features(observations[agent_id])
-            phi_next = agent.get_features(next_observations[agent_id])
+        td_errors = []
+        current_phi = {}
+        next_phi = {}
 
-            rewards_scaled = rewards[agent_id] / 100.0
-            td_error = agent.update(phi, phi_next, rewards_scaled)
-            td_sq.append(td_error ** 2)
+        for agent in agents:
+            current_phi[agent.id] = agent.get_features(observations[agent.id])
+            next_phi[agent.id] = agent.get_features(next_observations[agent.id])
+
+        for agent in agents:
+            reward = rewards[agent.id]
+            td_error = agent.update(current_phi[agent.id], next_phi[agent.id], reward)
+            td_errors.append(td_error**2)
+
         
-        msbes.append(torch.mean(torch.stack(td_sq)).cpu().item())
+        msbes.append(torch.mean(torch.stack(td_errors)).cpu().item())
         consensus_error = torch.std(torch.stack([a.w for a in agents]), dim=0).mean().item()
         print(f"Consensus Error: {consensus_error}")
         i += 1
         print(f"Step {i}, MSBE: {msbes[-1]}")
+        observations = next_observations
         if all(term.values()) or all(trunc.values()):
             observations = env.reset()
             break
-        observations = next_observations
     consensus_update(agents, A)
 
 
