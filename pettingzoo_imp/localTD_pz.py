@@ -1,149 +1,207 @@
-from pettingzoo.butterfly import cooperative_pong_v5
 import numpy as np
 import torch
-from collections import deque
-import random
+import torch.nn as nn
+import matplotlib.pyplot as plt
 
+from pettingzoo.butterfly import cooperative_pong_v5
+import supersuit as ss
+
+# --- Device Setup ---
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-torch.set_default_dtype(torch.float32)
 print("Using device:", device)
 
-env = cooperative_pong_v5.parallel_env(render_mode="human")
-observations, infos = env.reset(seed=42)
+# --- Feature Extractor Definition ---
+class FeatureExtractor(nn.Module):
+    def __init__(self, input_shape, feature_dim=128):
+        super(FeatureExtractor, self).__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(input_shape[0], 16, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        with torch.no_grad():
+            dummy = torch.zeros(1, *input_shape)
+            cnn_out_dim = self.cnn(dummy).shape[1]
+        self.fc = nn.Linear(cnn_out_dim, feature_dim)
 
+    def forward(self, x):
+        x = self.cnn(x)
+        x = self.fc(x)
+        return x
 
-class Agent:
-    def __init__(self, agent_id, feat_dim, beta, obs_dim, act_dim):
-        self.id = agent_id
-        self.w = torch.randn(feat_dim, device=device) * 0.1
-        self.beta = beta
-        self.mu = torch.tensor(0.0, device=device)
-        self.feature_dim = feat_dim
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.phi = torch.randn(feat_dim, obs_dim, device=device) * (1.0/np.sqrt(feat_dim))
+# --- Recursive Extraction Helper ---
+def recursive_extract(obs, default_shape=(84,84,3)):
+    """
+    Recursively extract the observation from nested dictionaries.
+    If the dict is empty, return a default zero array with default_shape.
+    """
+    while isinstance(obs, dict):
+        if len(obs) == 0:
+            return np.zeros(default_shape, dtype=np.float32)
+        if "observation" in obs:
+            obs = obs["observation"]
+        else:
+            obs = list(obs.values())[0]
+    return obs
 
-        self.normailze_phi()
+# --- Helper Functions ---
+def preprocess_obs(obs, device, default_shape=(84,84,3)):
+    """
+    Convert an observation to a normalized torch tensor in (C, H, W) format.
+    Uses recursive_extract to obtain the image from nested dict(s).
+    """
+    if obs is None:
+        return None
+    obs = recursive_extract(obs, default_shape=default_shape)
+    obs = np.array(obs, dtype=np.float32) / 255.0  # Normalize
+    if obs.ndim == 2:
+        obs = np.expand_dims(obs, axis=-1)
+    obs = np.transpose(obs, (2, 0, 1))
+    return torch.tensor(obs, device=device).unsqueeze(0)
 
-        self.theta = torch.randn(act_dim, feat_dim, device=device) * 0.1
+def consensus_update(agent_params):
+    """
+    Average the parameters across agents.
+    """
+    param_list = list(agent_params.values())
+    avg_param = sum(param_list) / len(param_list)
+    return {agent: avg_param.clone() for agent in agent_params.keys()}
 
-    def normailze_phi(self):
-        for s in range(self.phi.shape[1]):
-            norm_s = torch.linalg.norm(self.phi[:, s])
-            if norm_s > 0:
-                self.phi[:, s] /= norm_s
+def get_obs(observations, agent_idx):
+    """
+    Return the observation corresponding to agent_idx.
+    If observations is a dict, return observations[agent_name].
+    If it is a list or tuple, index it by agent_idx.
+    """
+    if isinstance(observations, dict):
+        obs = observations[agents[agent_idx]]
+        return obs
+    elif isinstance(observations, (tuple, list)):
+        return observations[agent_idx]
+    else:
+        raise TypeError("Observations must be a dict, tuple, or list.")
 
-    def get_features(self, observation):
-        obs_tensor = torch.tensor(observation, device=device, dtype=torch.float32).flatten()
-        obs_tensor = obs_tensor / 255.0
-        return torch.matmul(self.phi, obs_tensor)
-    
-    def update(self, phi, phi_next, reward):
-        td_error = reward - self.mu + torch.dot(phi_next, self.w) - torch.dot(phi, self.w)
-        self.w += self.beta * td_error * phi
-        self.mu = (1 - self.beta) * self.mu + self.beta * reward
-        return td_error
-    
-    def policy(self, observation):
-        features = self.get_features(observation)
-        logits = torch.matmul(self.theta, features)
-        action_probs = torch.softmax(logits, dim=-1)
-        return torch.multinomial(action_probs, 1).item()
+# --- Simulation Parameters ---
+num_comm_rounds = 1000      # Communication rounds (outer loop)
+local_updates = 10         # Number of local TD updates per communication round
+beta = 0.001                # TD learning rate for average reward update
 
-def consensus_update(agents, A):
-    """Perform consensus step using weight matrix A"""
-    with torch.no_grad():
-        all_w = torch.stack([agent.w for agent in agents])
+# --- Create and Wrap Environment ---
+env = cooperative_pong_v5.parallel_env(render_mode="rgb_array")
+env = ss.resize_v1(env, x_size=84, y_size=84)
+env = ss.dtype_v0(env, dtype=np.float32)
+observations = env.reset()
 
-        new_w = torch.matmul(A, all_w)
+agents = env.agents  # e.g. ['paddle_0', 'paddle_1']
+print("Agents:", agents)
 
+# --- Debug: Check Sample Observation ---
+sample_obs = get_obs(observations, 0)
+print("Raw sample_obs type:", type(sample_obs))
+print("Raw sample_obs (raw):", sample_obs)
+sample_obs = recursive_extract(sample_obs)
+print("Processed sample_obs shape (before transpose):", np.array(sample_obs).shape)
+if np.array(sample_obs).ndim == 2:
+    sample_obs = np.expand_dims(sample_obs, axis=-1)
+input_shape = np.transpose(sample_obs, (2, 0, 1)).shape
+print("Using input shape:", input_shape)
+feature_dim = 128
+
+# --- Instantiate Feature Extractor ---
+feature_extractor = FeatureExtractor(input_shape, feature_dim=feature_dim).to(device)
+feature_extractor.eval()
+
+# --- Initialize Agents' Parameters ---
+agent_params = {}
+agent_mu = {}  # Average reward estimates
+for agent in agents:
+    w = 0.01 * torch.randn(feature_dim, 1, device=device)
+    agent_params[agent] = w
+    agent_mu[agent] = torch.tensor(0.0, device=device)
+
+# --- Storage for MSBE ---
+msbe_list = []
+
+# --- Fixed Policy (Uniform Random) ---
+def fixed_policy(obs, action_space):
+    return action_space.sample()
+
+# --- Main Simulation Loop ---
+total_sample_updates = 0
+
+for comm_round in range(num_comm_rounds):
+    for update in range(local_updates):
+        actions = {}
         for i, agent in enumerate(agents):
-            agent.w = new_w[i]
-
-
-def compute_msbe(agents, phi, phi_next, rewards):
-    """Compute Mean Squared Bellman Error"""
-    errors = []
-    reward_tensor = torch.tensor(
-        [rewards.get(agent.id, 0.0) for agent in agents],
-        device=device
-    )
-    for i, agent in enumerate(agents):
-        phi_i = phi[agent.id]
-        phi_next_i = phi_next[agent.id]
-        td_error = reward_tensor[i] - agent.mu + torch.dot(phi_next_i, agent.w) - torch.dot(phi_i, agent.w)
-        errors.append(td_error ** 2)
-    return torch.mean(torch.stack(errors)).cpu().item()
-
-
-agent_ids = env.possible_agents
-num_agents = len(agent_ids)
-
-
-feat_dim = 32
-beta = 0.001
-obs_dim = np.prod(env.observation_space(agent_ids[0]).shape)
-act_dim = env.action_space(agent_ids[0]).n
-print("Observation dimension:", obs_dim)
-agents = [Agent(agent_id, feat_dim, beta, obs_dim, act_dim) for agent_id in agent_ids]
-
-A = torch.zeros((num_agents, num_agents))
-for i in range(num_agents):
-    neighbors = [(i-1)%num_agents, (i+1)%num_agents]
-    A[i, neighbors] = 0.3
-    A[i,i] = 0.4
-A = A / A.sum(dim=1, keepdim=True)
-print("A matrix row sums:", A.sum(dim=1))    
-K = 50
-L = 200
-
-consenesus_errors = []
-
-msbes = []
-i = 0
-observations, _ = env.reset()
-for l in range(L):  
-    for k in range(K):
+            obs = get_obs(observations, i)
+            actions[agent] = fixed_policy(obs, env.action_space(agent))
         
-        actions = {a.id: a.policy(observations[a.id]) for a in agents}
-        next_observations, rewards, term, trunc, infos = env.step(actions)
+        # Unpack 5 outputs from step()
+        next_obs, rewards, terminations, truncations, infos = env.step(actions)
+        dones = {agent: terminations[agent] or truncations[agent] for agent in agents}
+        
+        sample_msbe = []
+        for i, agent in enumerate(agents):
+            obs = get_obs(observations, i)
+            next_obs_agent = get_obs(next_obs, i)
+            if obs is None or next_obs_agent is None:
+                continue
 
-        td_errors = []
-        current_phi = {}
-        next_phi = {}
+            s_tensor = preprocess_obs(obs, device)
+            s_next_tensor = preprocess_obs(next_obs_agent, device)
+            if s_tensor is None or s_next_tensor is None:
+                continue
 
+            with torch.no_grad():
+                phi_s = feature_extractor(s_tensor).view(-1, 1)
+                phi_next = feature_extractor(s_next_tensor).view(-1, 1)
+            
+            w = agent_params[agent]
+            v = torch.matmul(phi_s.t(), w)
+            v_next = torch.matmul(phi_next.t(), w)
+            
+            r = torch.tensor(rewards[agent], device=device)
+            mu = agent_mu[agent]
+            # Average reward TD error
+            delta = r - mu + v_next - v
+            td_error_sq = (delta ** 2).item()
+            sample_msbe.append(td_error_sq)
+            
+            agent_params[agent] = w + beta * delta * phi_s
+            agent_mu[agent] = (1 - beta) * mu + beta * r
+
+        if sample_msbe:
+            avg_msbe = np.mean(sample_msbe)
+            msbe_list.append(avg_msbe)
+            total_sample_updates += 1
+
+        observations = next_obs
         for agent in agents:
-            current_phi[agent.id] = agent.get_features(observations[agent.id])
-            next_phi[agent.id] = agent.get_features(next_observations[agent.id])
+            if dones[agent]:
+                env.reset()
+                print(f"agent {agent} reset at update {total_sample_updates}")
 
-        for agent in agents:
-            reward = rewards[agent.id]
-            td_error = agent.update(current_phi[agent.id], next_phi[agent.id], reward)
-            td_errors.append(td_error**2)
+    # --- Communication Step ---
+    agent_params = consensus_update(agent_params)
 
-        
-        msbes.append(torch.mean(torch.stack(td_errors)).cpu().item())
-        consensus_error = torch.std(torch.stack([a.w for a in agents]), dim=0).mean().item()
-        print(f"Consensus Error: {consensus_error}")
-        i += 1
-        print(f"Step {i}, MSBE: {msbes[-1]}")
-        observations = next_observations
-        if all(term.values()) or all(trunc.values()):
-            observations = env.reset()
-            break
-    consensus_update(agents, A)
+    if (comm_round + 1) % 10 == 0:
+        with torch.no_grad():
+            sample_tensor = preprocess_obs(sample_obs, device)
+            phi_sample = feature_extractor(sample_tensor).view(-1, 1)
+            values = [torch.matmul(phi_sample.t(), agent_params[agent]).item() for agent in agents]
+            avg_value = np.mean(values)
+        print(f"Comm round {comm_round+1}/{num_comm_rounds}, average V(s) estimate: {avg_value:.4f}")
 
-
-
-        
 env.close()
-# Plot MSBE
-import matplotlib.pyplot as plt
-plt.plot(msbes)
-plt.xlabel("Local TD Update Step")
-plt.ylabel("Mean Squared Bellman Error (MSBE)")
-plt.title("Tracking MSBE at Each Local Sample Round")
+
+# --- Plot MSBE Over Time ---
+plt.figure(figsize=(10, 5))
+plt.plot(msbe_list, label="Average MSBE")
+plt.xlabel("Sample Update Step")
+plt.ylabel("MSBE")
+plt.title("Evolution of MSBE (Average Reward Setting)")
+plt.legend()
 plt.grid(True)
 plt.show()
-
-        
