@@ -4,3 +4,5 @@ matplotlib
 scipy
 pygame
 torch
+supersuit
+"imageio[ffmpeg]"
