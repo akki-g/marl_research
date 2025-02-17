@@ -2,34 +2,31 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from pettingzoo.mpe import simple_spread_v3
+import imageio  
 
-# Use MPS if available; otherwise, use CPU (or "cuda" if available)
+
+# -------------------- Device Setup --------------------
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print("Using device:", device)
 
+# -------------------- Feature Extraction --------------------
 def get_feature_vector(obs, num_landmarks, num_agents):
     """
-    Constructs the feature vector φ(s) for an agent.
-    Assumes the observation from simple_spread_v3 is structured as:
+    Constructs the feature vector φ(s) for an agent based on its observation.
+    For simple_spread_v3, the observation is assumed to be arranged as:
       [self_vel (2), self_pos (2), landmark_rel_positions (num_landmarks*2),
-       other_agent_rel_positions ((num_agents-1)*2), communication (remaining dims)]
-       
-    For our cooperative navigation experiment we ignore the communication part.
-    For N agents and N landmarks (with N=9 in the paper), we extract:
-      - self_pos: 2 dims (indices 2:4)
-      - landmark_rel_pos: 2*num_landmarks dims (indices 4:4+num_landmarks*2)
-      - other_agents_rel_pos: 2*(num_agents-1) dims (following immediately)
-      
-    This yields a 2 + 2*num_landmarks + 2*(num_agents-1) dimensional vector.
-    For N=9 and num_landmarks=9, that gives 2 + 18 + 16 = 36 dimensions.
-    The vector is then normalized.
+       other_agents_rel_positions ((num_agents-1)*2), communication (remaining dims)]
+    We ignore communication and extract:
+      - self_pos = obs[2:4]
+      - landmark_rel_pos = obs[4:4+2*num_landmarks]
+      - other_agents_rel_pos = obs[4+2*num_landmarks : 4+2*num_landmarks+2*(num_agents-1)]
+    For num_agents=9 and num_landmarks=9, this gives 2+18+16 = 36 dims.
+    The resulting vector is normalized.
     """
-    # Extract self position from indices 2:4 (since obs[0:2] are self_vel)
     agent_pos = obs[2:4]
     start_landmark = 4
     end_landmark = start_landmark + num_landmarks * 2
     landmark_rel_pos = obs[start_landmark:end_landmark]
-    # Extract other agents relative positions (ignoring communication)
     other_agents_rel_pos = obs[end_landmark:end_landmark + (num_agents - 1) * 2]
     feature_vector = np.concatenate([agent_pos, landmark_rel_pos, other_agents_rel_pos])
     norm = np.linalg.norm(feature_vector)
@@ -37,40 +34,34 @@ def get_feature_vector(obs, num_landmarks, num_agents):
         feature_vector = feature_vector / norm
     return feature_vector
 
+# -------------------- Error Metrics --------------------
 def calculate_consensus_error(weights):
     """
     Computes the consensus error:
-      ConsensusError = (1/N) ∑_i ||w_i - w̄||²,
-    where w̄ is the average weight vector over all agents.
+      ConsensusError = (1/N) ∑_{i=1}^N ||w_i - w̄||²,
+    where w̄ is the average weight vector.
     """
     agent_ids = list(weights.keys())
     N = len(agent_ids)
-    W = torch.stack([weights[agent] for agent in agent_ids], dim=0)  # shape (N, feat_dim)
+    if N == 0:
+        return 0.0
+    W = torch.stack([weights[agent] for agent in agent_ids], dim=0)
     w_bar = torch.mean(W, dim=0)
     consensus_error = torch.mean(torch.sum((W - w_bar) ** 2, dim=1))
     return consensus_error.item()
 
-def calculate_msbe(sample_data):
+def calculate_SBE(sample_data):
     """
-    Computes the squared Bellman error (SBE) for one sample and returns the MSBE over agents.
-    
+    Computes the instantaneous squared Bellman error (SBE) for a sample update.
     For each agent i, define:
       error_i = φ(s)ᵀw_i + μ̄ - r̄ - φ(s')ᵀw_i,
-    where r̄ and μ̄ are the averages of rewards and running averages over all agents.
-    Then, MSBE = (1/N) ∑_i (error_i)².
-    
-    Args:
-        sample_data: dict mapping agent IDs to a dict with keys:
-           'phi_s'      : φ(s) (torch.Tensor, shape [feat_dim])
-           'phi_s_next' : φ(s') (torch.Tensor, shape [feat_dim])
-           'reward'     : observed reward (float)
-           'mu'         : current running average (torch scalar)
-           'w'          : weight vector (torch.Tensor, shape [feat_dim])
-    Returns:
-        msbe (float)
+    where r̄ and μ̄ are the averages over agents.
+    SBE = (1/N) ∑_{i=1}^N error_i².
     """
     agent_ids = list(sample_data.keys())
     N = len(agent_ids)
+    if N == 0:
+        return 0.0
     r_bar = sum(sample_data[agent]['reward'] for agent in agent_ids) / N
     mu_bar = sum(sample_data[agent]['mu'] for agent in agent_ids) / N
     errors = []
@@ -78,26 +69,49 @@ def calculate_msbe(sample_data):
         w = sample_data[agent]['w']
         phi_s = sample_data[agent]['phi_s']
         phi_s_next = sample_data[agent]['phi_s_next']
-        value_current = torch.dot(phi_s, w)
-        value_next = torch.dot(phi_s_next, w)
+        value_current = torch.dot(phi_s.t(), w)
+        value_next = torch.dot(phi_s_next.t(), w)
         error = value_current + mu_bar - r_bar - value_next
         errors.append(error ** 2)
-    msbe = sum(errors) / N
-    return msbe.item()
+    SBE = sum(errors) / N
+    return SBE.item()
+
+# -------------------- Consensus Matrix --------------------
+def generate_ring_matrix(N, diag=0.4, off_diag=0.3):
+    """
+    Generates a ring consensus matrix for N agents.
+    For agent 0, neighbors: agent 1 and agent N-1.
+    For agent i (1 <= i <= N-2): neighbors: i-1 and i+1.
+    For agent N-1, neighbors: agent N-2 and agent 0.
+    """
+    A = np.zeros((N, N))
+    if N == 1:
+        A[0,0] = 1.0
+        return torch.tensor(A, dtype=torch.float32)
+    A[0,0] = diag
+    A[0,1] = off_diag
+    A[0,N-1] = off_diag
+    for i in range(1, N-1):
+        A[i,i] = diag
+        A[i,i-1] = off_diag
+        A[i,i+1] = off_diag
+    A[N-1,N-1] = diag
+    A[N-1,N-2] = off_diag
+    A[N-1,0] = off_diag
+    return torch.tensor(A, dtype=torch.float32)
 
 def generate_consensus_matrix(N, p=0.5):
     """
-    Generates a consensus matrix A for N agents based on an Erdos–Rényi (ER) graph
-    with connection probability p. We use a Metropolis–Hastings weighting rule:
-      For i ≠ j, if an edge exists then:
-          A[i,j] = 1 / (1 + max{deg(i), deg(j)}),
-      and A[i,i] = 1 - ∑_{j ≠ i} A[i,j].
+    Generates a consensus matrix A for N agents based on an Erdos–Rényi (ER) graph with connection probability p.
+    Using a simple Metropolis–Hastings rule:
+      For i ≠ j, if an edge exists: A[i,j] = 1 / (1 + max{deg(i), deg(j)}),
+      Then A[i,i] = 1 - ∑₍j ≠ i₎ A[i,j].
     Returns:
         A: torch.Tensor of shape (N, N)
     """
     A = np.zeros((N, N))
     for i in range(N):
-        for j in range(i + 1, N):
+        for j in range(i+1, N):
             if np.random.rand() < p:
                 A[i, j] = 1
                 A[j, i] = 1
@@ -109,80 +123,87 @@ def generate_consensus_matrix(N, p=0.5):
                 W[i, j] = 1.0 / (1.0 + max(degrees[i], degrees[j]))
         W[i, i] = 1.0 - W[i].sum()
     return torch.tensor(W, dtype=torch.float32)
-
+# -------------------- Agent Model --------------------
 class AgentModel:
     """
-    Stores the learnable weight vector w and running average μ for an agent.
+    Stores the learnable weight vector w, the running average reward μ,
+    and the previous feature vector φ(s).
     The value function is approximated as V(s) = φ(s)ᵀw.
     """
     def __init__(self, agent_id, feat_dim, init_mu=0.0):
         self.agent_id = agent_id
-        self.w = torch.zeros(feat_dim, device=device, dtype=torch.float32, requires_grad=False)
+        self.w = torch.ones(feat_dim, device=device, dtype=torch.float32)
         self.mu = torch.tensor(init_mu, device=device, dtype=torch.float32)
-        self.prev_phi = None  # Stores φ(s) from the previous step
-        self.delta_history = []  # Records TD errors for analysis
+        self.prev_phi = None
+        self.delta_history = []
 
-# Hyperparameters and settings
-L = 200            # Number of communication rounds
-K = 50            # Number of local TD-update (sample) steps per round
-beta = 0.1        # Learning rate (step size)
-num_agents = 9    # Number of agents (and landmarks, per cooperative navigation task)
-num_landmarks = num_agents  # In simple spread, typically number of landmarks equals number of agents
-consensus_p = 0.5 # ER connection probability
+# -------------------- Hyperparameters --------------------
+L = 500           # Number of communication rounds
+K = 20            # Number of local TD-update (sample) steps per round
+beta = 0.1        # Step size for the update
+num_agents = 9    # Number of agents (and landmarks)
+num_landmarks = num_agents  # For simple_spread, typically equal to number of agents
+A_consensus = generate_ring_matrix(num_agents).to(device)
 
-# Create the environment using the parallel API.
-env = simple_spread_v3.env(N=num_agents, local_ratio=0.5, max_cycles=None, continuous_actions=False, render_mode='rgb_array')
-obs = env.reset(seed=42)  # obs is a dict mapping agent IDs to observations
+# -------------------- Environment Setup --------------------
+env = simple_spread_v3.parallel_env(
+    N=num_agents, local_ratio=0.5, max_cycles=10_000, 
+    continuous_actions=False, render_mode='rgb_array'
+)
+obs, infos = env.reset(seed=42)  # Parallel API returns (obs, infos)
 
-# Initialize AgentModel for each agent.
-# Compute feature dimension using one agent's observation.
+# Initialize each agent's model.
 sample_phi = get_feature_vector(obs[env.agents[0]], num_landmarks, num_agents)
-feat_dim = len(sample_phi)  # should be 36 for N=9 and num_landmarks=9
+feat_dim = len(sample_phi)
 agents_model = {agent: AgentModel(agent, feat_dim) for agent in env.agents}
 
-# Initialize each agent's prev_phi.
+# Set initial φ(s) for each agent.
 for agent in env.agents:
-    phi = torch.tensor(get_feature_vector(obs[agent], num_landmarks, num_agents), device=device, dtype=torch.float32)
-    agents_model[agent].prev_phi = phi
+    phi_init = torch.tensor(get_feature_vector(obs[agent], num_landmarks, num_agents),
+                              device=device, dtype=torch.float32)
+    agents_model[agent].prev_phi = phi_init
 
-# Prepare lists to record MSBE and consensus error at every sample update.
-msbe_per_sample = []
+# -------------------- Main Loop --------------------
+# We also keep a list of instantaneous SBE values, then compute the running average (MSBE) over history.
+sbe_history = []
+msbe_running = []  # running average over sbe_history
 consensus_per_sample = []
 sample_count = 0
-
-# Generate consensus matrix based on ER network.
-A_consensus = generate_consensus_matrix(num_agents, p=consensus_p)
-print("Consensus matrix A:\n", A_consensus.numpy())
-
-# Main loop: for each communication round (L rounds), perform K local TD-update steps.
+video_frames = []     
+comm_snapshots = [] 
 for l in range(L):
     print(f"\n=== Communication Round {l} ===")
     for k in range(K):
-        # Sample one step: select random actions for all agents.
-        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-        new_obs, rewards, dones, truncs, infos = env.step(actions)
+        actions = {agent: int(env.action_space(agent).sample()) for agent in env.agents}
+        obs, rewards, dones, truncs, infos = env.step(actions)
         
-        # Prepare a dictionary to collect sample data for MSBE calculation at this sample.
+        if not env.agents:
+            print("No active agents; resetting environment.")
+            obs, infos = env.reset()
+            for agent in env.agents:
+                phi_reset = torch.tensor(get_feature_vector(obs[agent], num_landmarks, num_agents),
+                                           device=device, dtype=torch.float32)
+                agents_model[agent].prev_phi = phi_reset
+            break
+        
         sample_data = {}
-        
         for agent in env.agents:
             model = agents_model[agent]
-            # φ(s) is stored in model.prev_phi.
             phi_s = model.prev_phi
-            # Compute φ(s') for the new observation.
-            phi_s_next = torch.tensor(get_feature_vector(new_obs[agent], num_landmarks, num_agents),
+            phi_s_next = torch.tensor(get_feature_vector(obs[agent], num_landmarks, num_agents),
                                         device=device, dtype=torch.float32)
-            value_current = torch.dot(phi_s, model.w)
-            value_next = torch.dot(phi_s_next, model.w)
+            value_current = torch.dot(phi_s.t(), model.w)
+            value_next = torch.dot(phi_s_next.t(), model.w)
             r = torch.tensor(rewards[agent], device=device, dtype=torch.float32)
-            # TD error: δ = r - μ + φ(s')ᵀw - φ(s)ᵀw.
+            
+            # TD error (average reward TD update):
             delta = r - model.mu + value_next - value_current
             model.delta_history.append(delta.item())
-            # Update weight: w ← w + beta * δ * φ(s)
+            # Update weight vector: w ← w + β * δ * φ(s)
             model.w = model.w + beta * delta * phi_s
-            # Update running average: μ ← beta * r + (1 - beta) * μ.
-            model.mu = beta * r + (1 - beta) * model.mu
-            # Record data for MSBE calculation.
+            # Update running average reward: μ ← (1 - β) * μ + β * r.
+            model.mu = (1 - beta) * model.mu + beta * r
+
             sample_data[agent] = {
                 'phi_s': phi_s,
                 'phi_s_next': phi_s_next,
@@ -190,52 +211,58 @@ for l in range(L):
                 'mu': model.mu,
                 'w': model.w
             }
-            # Update prev_phi for the next sample.
             model.prev_phi = phi_s_next
-        
-        # Record MSBE and consensus error for this sample update.
+        instantaneous_sbe = calculate_SBE(sample_data)
+        sbe_history.append(instantaneous_sbe)
+        running_avg = np.mean(sbe_history)
+        msbe_running.append(running_avg)
+        frame = env.render()
+        video_frames.append(frame)
         weights_dict = {agent: agents_model[agent].w for agent in env.agents}
-        msbe_val = calculate_msbe(sample_data)
-        consensus_val = calculate_consensus_error(weights_dict)
-        msbe_per_sample.append(msbe_val)
-        consensus_per_sample.append(consensus_val)
+        cons_val = calculate_consensus_error(weights_dict)
+        consensus_per_sample.append(cons_val)
         sample_count += 1
         
-        # Update obs for next sample.
-        obs = new_obs
-
-    # End of K local steps in the round: perform consensus update.
-    # Update each agent's weight using the consensus matrix: w_i = sum_j A[i,j] * w_j.
+    # Consensus update at end of communication round.
+    comm_snapshots.append(env.render())
     all_agents = env.agents
-    W = torch.stack([agents_model[agent].w for agent in all_agents], dim=0)  # shape (N, feat_dim)
-    new_W = torch.matmul(A_consensus, W)
-    for i, agent in enumerate(all_agents):
-        agents_model[agent].w = new_W[i].clone()
-    
-    # Record consensus error immediately after the consensus update.
-    weights_dict = {agent: agents_model[agent].w for agent in all_agents}
-    consensus_after = calculate_consensus_error(weights_dict)
-    # Optionally, append the consensus error as an extra sample.
-    msbe_per_sample.append(msbe_per_sample[-1])
-    consensus_per_sample.append(consensus_after)
-    sample_count += 1
-    print(f"After Round {l}, post-consensus consensus error = {consensus_after:.4f}")
+    if len(all_agents) > 0:
+        W = torch.stack([agents_model[agent].w for agent in all_agents], dim=0)
+        new_W = torch.matmul(A_consensus, W)
+        for i, agent in enumerate(all_agents):
+            agents_model[agent].w = new_W[i].clone()
+        weights_dict = {agent: agents_model[agent].w for agent in all_agents}
+        cons_after = calculate_consensus_error(weights_dict)
+        # Append consensus error after consensus update (keeping MSBE same as last sample)
+        msbe_running.append(msbe_running[-1])
+        consensus_per_sample.append(cons_after)
+        sample_count += 1
+        print(f"After Round {l}: Post-consensus consensus error = {cons_after:.4f}")
 
 env.close()
+def save_video(frames, filename="local_ratio.mp4", fps=10):
+    imageio.mimwrite(filename, frames, fps=fps)
+    print(f"Video saved to {filename}")
 
-# Plot the MSBE and consensus error versus sample update step.
+def save_images(frames, prefix="comm_snapshot"):
+    for i, frame in enumerate(frames):
+        imageio.imwrite(f"{prefix}_{i:03d}.png", frame)
+    print(f"{len(frames)} images saved with prefix '{prefix}_'.")
+# -------------------- Plotting --------------------
 plt.figure(figsize=(12,5))
 plt.subplot(1,2,1)
-plt.plot(msbe_per_sample, marker='.')
+plt.plot(msbe_running, marker='.')
 plt.xlabel("Sample Update Step")
 plt.ylabel("MSBE")
-plt.title("MSBE per Sample Update")
+plt.title("Running MSBE per Sample Update (Average Reward)")
 
 plt.subplot(1,2,2)
 plt.plot(consensus_per_sample, marker='.', color='red')
 plt.xlabel("Sample Update Step")
 plt.ylabel("Consensus Error")
 plt.title("Consensus Error per Sample Update")
-
 plt.tight_layout()
 plt.show()
+
+save_video(video_frames)
+
