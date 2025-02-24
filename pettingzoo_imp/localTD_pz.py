@@ -10,7 +10,7 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print("Using device:", device)
 
 # -------------------- Feature Extraction --------------------
-def get_feature_vector(obs, num_landmarks, num_agents):
+def get_feature_vector(obs):
     """
     Constructs the feature vector φ(s) for an agent based on its observation.
     For simple_spread_v3, the observation is assumed to be arranged as:
@@ -23,12 +23,7 @@ def get_feature_vector(obs, num_landmarks, num_agents):
     For num_agents=9 and num_landmarks=9, this gives 2+18+16 = 36 dims.
     The resulting vector is normalized.
     """
-    agent_pos = obs[2:4]
-    start_landmark = 4
-    end_landmark = start_landmark + num_landmarks * 2
-    landmark_rel_pos = obs[start_landmark:end_landmark]
-    other_agents_rel_pos = obs[end_landmark:end_landmark + (num_agents - 1) * 2]
-    feature_vector = np.concatenate([agent_pos, landmark_rel_pos, other_agents_rel_pos])
+    feature_vector = obs
     norm = np.linalg.norm(feature_vector)
     if norm > 0:
         feature_vector = feature_vector / norm
@@ -147,7 +142,7 @@ A_consensus = generate_ring_matrix(num_agents).to(device)
 
 # -------------------- Environment Setup --------------------
 env = simple_spread_v3.parallel_env(
-    N=num_agents, local_ratio=0.5, max_cycles=10_000, 
+    N=num_agents, local_ratio=0.25, max_cycles=10_000, 
     continuous_actions=False, render_mode='rgb_array'
 )
 obs, infos = env.reset(seed=42)  # Parallel API returns (obs, infos)
@@ -199,8 +194,6 @@ for l in range(L):
             # TD error (average reward TD update):
             delta = r - model.mu + value_next - value_current
             model.delta_history.append(delta.item())
-            # Update weight vector: w ← w + β * δ * φ(s)
-            model.w = model.w + beta * delta * phi_s
             # Update running average reward: μ ← (1 - β) * μ + β * r.
             model.mu = (1 - beta) * model.mu + beta * r
 
@@ -212,6 +205,10 @@ for l in range(L):
                 'w': model.w
             }
             model.prev_phi = phi_s_next
+        for agent in env.agents:
+            model = agents_model[agent]
+            # Update weight vector: w ← w + β * δ * φ(s)
+            model.w = model.w + beta * model.delta_history[-1] * phi_s
         instantaneous_sbe = calculate_SBE(sample_data)
         sbe_history.append(instantaneous_sbe)
         running_avg = np.mean(sbe_history)
