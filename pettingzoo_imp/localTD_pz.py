@@ -6,7 +6,7 @@ import imageio
 
 
 # -------------------- Device Setup --------------------
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda")
 print("Using device:", device)
 
 # -------------------- Feature Extraction --------------------
