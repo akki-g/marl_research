@@ -148,7 +148,7 @@ A_consensus = generate_ring_matrix(num_agents).to(device)
 
 # -------------------- Environment Setup --------------------
 env = simple_spread_v3.parallel_env(
-    N=num_agents, local_ratio=0.15, max_cycles=10_000, 
+    N=num_agents, local_ratio=0.5, max_cycles=10_000, 
     continuous_actions=False, render_mode='rgb_array'
 )
 obs, infos = env.reset(seed=42)  # Parallel API returns (obs, infos)
