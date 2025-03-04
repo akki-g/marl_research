@@ -10,7 +10,7 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cuda")
 print("Using device:", device)
 
 # -------------------- Feature Extraction --------------------
-def get_feature_vector(obs, num_agents=9, num_landmarks=9):
+def get_feature_vector(obs, num_agents=9, num_landmarks=9, d = 2):
     """
     Constructs the feature vector φ(s) for an agent based on its observation.
     For simple_spread_v3, the observation is assumed to be arranged as:
@@ -30,7 +30,7 @@ def get_feature_vector(obs, num_agents=9, num_landmarks=9):
     # Extract other agents relative positions (ignoring communication)
     other_agents_rel_pos = obs[end_landmark:end_landmark + (num_agents - 1) * 2]
     feature_vector = np.concatenate([agent_pos, landmark_rel_pos, other_agents_rel_pos])
-    norm = np.linalg.norm(feature_vector)
+    norm = np.linalg.norm(feature_vector, ord=1)
     if norm > 0:
         feature_vector = feature_vector / norm
     return feature_vector
@@ -48,7 +48,8 @@ def calculate_consensus_error(weights):
         return 0.0
     W = torch.stack([weights[agent] for agent in agent_ids], dim=0)
     w_bar = torch.mean(W, dim=0)
-    consensus_error = torch.mean(torch.sum((W - w_bar) ** 2, dim=1))
+    eucild = torch.norm(W - w_bar, dim=1)
+    consensus_error = torch.mean(eucild ** 2)
     return consensus_error.item()
 
 def calculate_SBE(sample_data):
@@ -175,6 +176,11 @@ video_frames = []
 comm_snapshots = [] 
 for l in range(L):
     print(f"\n=== Communication Round {l} ===")
+    obs, infos = env.reset(seed=42)
+    for agent in env.agents:
+        phi_reset = torch.tensor(get_feature_vector(obs[agent]),
+                                  device=device, dtype=torch.float32)
+        agents_model[agent].prev_phi = phi_reset
     for k in range(K):
         actions = {agent: int(env.action_space(agent).sample()) for agent in env.agents}
         obs, rewards, dones, truncs, infos = env.step(actions)
@@ -226,6 +232,7 @@ for l in range(L):
     # Consensus update at end of communication round.
     comm_snapshots.append(env.render())
     all_agents = env.agents
+    print(f"Round {l}: Number of active agents = {len(all_agents)}")
     if len(all_agents) > 0:
         W = torch.stack([agents_model[agent].w for agent in all_agents], dim=0)
         new_W = torch.matmul(A_consensus, W)
