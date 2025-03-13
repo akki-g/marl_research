@@ -125,6 +125,31 @@ def generate_consensus_matrix(N, p=0.5):
                 W[i, j] = 1.0 / (1.0 + max(degrees[i], degrees[j]))
         W[i, i] = 1.0 - W[i].sum()
     return torch.tensor(W, dtype=torch.float32)
+
+def generate_symmetric_matrix(n):
+    A = torch.rand(n, n)
+    A = 0.5 * (A + A.t())
+    return A.float()
+
+def sinkhorn_knopp(A, max_iters=1000, tol=1e-6, eps=1e-9):
+
+    for _ in range(max_iters):
+        A = A / (A.sum(dim=0, keepdim=True) + eps)  # Normalize columns
+        A = A / (A.sum(dim=1, keepdim=True) + eps)  # Normalize row
+        if torch.all(torch.abs(A.sum(dim=0) - 1) < tol) and torch.all(torch.abs(A.sum(dim=1) - 1) < tol):
+            break
+    
+    return A
+
+def generate_symmetric_doubly_stochastic_matrix(n, max_iters=1000, tol=1e-6, eps=1e-9):
+    A = generate_symmetric_matrix(n)
+    A = sinkhorn_knopp(A, max_iters, tol, eps=1e-9)
+    return A
+
+
+
+
+
 # -------------------- Agent Model --------------------
 class AgentModel:
     """
@@ -139,17 +164,20 @@ class AgentModel:
         self.prev_phi = None
         self.delta_history = []
 
+
+
+# -------------------- Local TD(0) --------------------
 # -------------------- Hyperparameters --------------------
 L = 500           # Number of communication rounds
 K = 20            # Number of local TD-update (sample) steps per round
 beta = 0.1        # Step size for the update
-num_agents = 9    # Number of agents (and landmarks)
+num_agents = 3    # Number of agents (and landmarks)
 num_landmarks = num_agents  # For simple_spread, typically equal to number of agents
-A_consensus = generate_ring_matrix(num_agents).to(device)
+A_consensus = generate_symmetric_doubly_stochastic_matrix(num_agents).to(device)
 
 # -------------------- Environment Setup --------------------
 env = simple_spread_v3.parallel_env(
-    N=num_agents, local_ratio=0.5, max_cycles=10_000, 
+    N=num_agents, local_ratio=0.5, max_cycles=1000, 
     continuous_actions=False, render_mode='rgb_array'
 )
 obs, infos = env.reset(seed=42)  # Parallel API returns (obs, infos)
@@ -166,6 +194,9 @@ for agent in env.agents:
                               device=device, dtype=torch.float32)
     agents_model[agent].prev_phi = phi_init
 
+
+
+
 # -------------------- Main Loop --------------------
 # We also keep a list of instantaneous SBE values, then compute the running average (MSBE) over history.
 sbe_history = []
@@ -176,11 +207,6 @@ video_frames = []
 comm_snapshots = [] 
 for l in range(L):
     print(f"\n=== Communication Round {l} ===")
-    obs, infos = env.reset(seed=42)
-    for agent in env.agents:
-        phi_reset = torch.tensor(get_feature_vector(obs[agent]),
-                                  device=device, dtype=torch.float32)
-        agents_model[agent].prev_phi = phi_reset
     for k in range(K):
         actions = {agent: int(env.action_space(agent).sample()) for agent in env.agents}
         obs, rewards, dones, truncs, infos = env.step(actions)
@@ -242,6 +268,9 @@ for l in range(L):
         cons_after = calculate_consensus_error(weights_dict)
         # Append consensus error after consensus update (keeping MSBE same as last sample)
         print(f"After Round {l}: Post-consensus consensus error = {cons_after:.4f}")
+
+
+
 
 env.close()
 def save_video(frames, filename="local_ratio.mp4", fps=10):
