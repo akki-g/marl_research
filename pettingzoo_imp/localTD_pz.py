@@ -8,22 +8,17 @@ import networkx as nx
 from tqdm import tqdm
 
 # -------------------- Device Setup --------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else 
+                     "cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # -------------------- Network Topology Functions --------------------
-def generate_ring_network(N, diag_weight=0.4, offdiag_weight=0.3):
-    """
-    Generate a ring network consensus matrix with N agents exactly as in the paper.
-    - Each agent is connected to its left and right neighbors
-    - Self-connection has weight diag_weight (0.4 as per paper)
-    - Neighbor connections have weight offdiag_weight (0.3 as per paper)
-    """
+def generate_ring_network(N):
     A = np.zeros((N, N))
     for i in range(N):
-        A[i, i] = diag_weight
-        A[i, (i-1) % N] = offdiag_weight
-        A[i, (i+1) % N] = offdiag_weight
+        A[i, i] = 0.4  # Exactly as specified in paper
+        A[i, (i-1) % N] = 0.3  # Left neighbor
+        A[i, (i+1) % N] = 0.3  # Right neighbor
     return torch.tensor(A, dtype=torch.float32, device=device)
 
 def generate_regular_network(N, degree, diag_weight=0.4):
@@ -124,7 +119,9 @@ def calculate_consensus_error(weights):
     W = torch.stack([weights[agent] for agent in agent_ids], dim=0)
     w_bar = torch.mean(W, dim=0)
     errors = torch.norm(W - w_bar, dim=1) ** 2
-    return torch.mean(errors).item()
+    
+    # Move tensor to CPU before converting to numpy/scalar
+    return torch.mean(errors).cpu().item()
 
 def calculate_SBE(sample_data):
     """
@@ -137,7 +134,7 @@ def calculate_SBE(sample_data):
         
     # Calculate averages across agents
     r_bar = sum(sample_data[agent]['reward'] for agent in agent_ids) / N
-    mu_bar = sum(sample_data[agent]['mu'].item() for agent in agent_ids) / N
+    mu_bar = sum(sample_data[agent]['mu'].cpu().item() for agent in agent_ids) / N
     
     errors = []
     for agent in agent_ids:
@@ -150,8 +147,10 @@ def calculate_SBE(sample_data):
         
         error = value_current + mu_bar - r_bar - value_next
         errors.append(error ** 2)
-        
-    return sum(errors) / N
+    
+    # Sum errors and convert to CPU scalar
+    total_error = sum(error.cpu().item() if isinstance(error, torch.Tensor) else error for error in errors)
+    return total_error / N
 
 # -------------------- Agent Model --------------------
 class LocalTDAgent:
@@ -160,7 +159,7 @@ class LocalTDAgent:
     """
     def __init__(self, agent_id, feat_dim, init_mu=0.0):
         self.agent_id = agent_id
-        self.w = torch.zeros(feat_dim, device=device, dtype=torch.float32)
+        self.w = torch.randn(feat_dim, device=device, dtype=torch.float32) * 0.01
         self.mu = torch.tensor(init_mu, device=device, dtype=torch.float32)
         self.prev_phi = None
         
@@ -184,10 +183,10 @@ class LocalTDAgent:
         return {
             'phi_s': phi_s,
             'phi_s_next': phi_s_next,
-            'reward': reward.item(),
+            'reward': reward.cpu().item(),  # Move to CPU for safe storage
             'mu': self.mu,
             'w': self.w,
-            'delta': delta.item()
+            'delta': delta.cpu().item()  # Move to CPU for safe storage
         }
 
 # -------------------- Local TD(0) Algorithm (Algorithm 1) --------------------
