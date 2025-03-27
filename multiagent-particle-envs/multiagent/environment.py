@@ -78,29 +78,52 @@ class MultiAgentEnv(gym.Env):
         self._reset_render()
 
     def step(self, action_n):
-        obs_n = []
-        reward_n = []
-        done_n = []
-        info_n = {'n': []}
-        self.agents = self.world.policy_agents
-        # set action for each agent
-        for i, agent in enumerate(self.agents):
-            self._set_action(action_n[i], agent, self.action_space[i])
+    # Convert discrete actions to appropriate format if needed
+        processed_actions = []
+        for i, action in enumerate(action_n):
+            if isinstance(self.action_space[i], gym.spaces.Discrete):
+                # For Discrete spaces, convert to one-hot or directional action
+                # This depends on the specific implementation in your environment
+                # Here's a common mapping for 5 discrete actions (no-op, up, right, down, left)
+                if action == 0:  # No-op
+                    processed_actions.append(np.array([0.0, 0.0, 0.0, 0.0, 0.0]))
+                elif action == 1:  # Up
+                    processed_actions.append(np.array([0.0, 1.0, 0.0, 0.0, 0.0]))
+                elif action == 2:  # Right
+                    processed_actions.append(np.array([0.0, 0.0, 1.0, 0.0, 0.0]))
+                elif action == 3:  # Down
+                    processed_actions.append(np.array([0.0, 0.0, 0.0, 1.0, 0.0]))
+                elif action == 4:  # Left
+                    processed_actions.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0]))
+                else:
+                    processed_actions.append(np.array([0.0, 0.0, 0.0, 0.0, 0.0]))
+            else:
+                # For continuous spaces, use the action as is
+                processed_actions.append(action)
+        
+        # Apply the processed actions
+        self._set_action(processed_actions, self.agents, self.action_space)
+
         # advance world state
         self.world.step()
         # record observation for each agent
+        obs_n = []
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
+        # record reward for each agent
+        reward_n = []
+        for agent in self.agents:
             reward_n.append(self._get_reward(agent))
-            done_n.append(self._get_done(agent))
-
-            info_n['n'].append(self._get_info(agent))
-
-        # all agents get total reward in cooperative case
-        reward = np.sum(reward_n)
-        if self.shared_reward:
-            reward_n = [reward] * self.n
-
+        # record done for each agent
+        done_n = []
+        info_n = []
+        for agent in self.agents:
+            # Check if the episode is done for this agent
+            done = False  # You can update this based on your environment logic
+            info = {}     # You can add information as needed
+            done_n.append(done)
+            info_n.append(info)
+        
         return obs_n, reward_n, done_n, info_n
 
     def reset(self):
