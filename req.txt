@@ -6,3 +6,4 @@ pygame
 torch
 supersuit
 imageio
+tqdm
