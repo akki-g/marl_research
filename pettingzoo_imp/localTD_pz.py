@@ -471,7 +471,7 @@ def run_topology_comparison(
     os.makedirs(save_dir, exist_ok=True)
     
     # Network topologies to test
-    network_types = ['ring', '4-regular', '6-regular', 'er', 'complete']
+    network_types = ['ring']
     results = {}
     
     # Run experiment for each network type
