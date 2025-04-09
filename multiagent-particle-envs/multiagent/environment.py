@@ -175,53 +175,31 @@ class MultiAgentEnv(gym.Env):
         info_n = {agent.name: self._get_info(agent) for agent in self.agents}
         return obs_n, info_n
 
-    def step(self, action_n: List) -> Tuple[List, List, List, List, Dict]:
-        """
-        Step the environment with actions for all agents.
-        
-        Args:
-            action_n: List of actions for each agent
-            
-        Returns:
-            obs_n: List of observations for each agent
-            reward_n: List of rewards for each agent
-            terminated_n: List of termination flags for each agent
-            truncated_n: List of truncation flags for each agent
-            info_n: Dictionary of info for each agent
-        """
-        self.current_step += 1
-        
-        # Set actions for each agent
-        for i, agent in enumerate(self.agents):
-            self._set_action(action_n[i], agent, self.action_space[i])
-            
-        # Advance world state
-        self.world.step()
-        
-        # Record observations for each agent
+    def step(self, action_n):
         obs_n = []
         reward_n = []
-        terminated_n = []
-        truncated_n = []
-        info_n = {'n': {}}
-        
+        done_n = []
+        info_n = {'n': []}
+        self.agents = self.world.policy_agents
+        # set action for each agent
+        for i, agent in enumerate(self.agents):
+            self._set_action(action_n[i], agent, self.action_space[i])
+        # advance world state
+        self.world.step()
+        # record observation for each agent
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
             reward_n.append(self._get_reward(agent))
-            terminated = self._get_done(agent)
-            # Check for cycle limit truncation
-            truncated = self.current_step >= self.max_cycles
-            
-            terminated_n.append(terminated)
-            truncated_n.append(truncated)
-            info_n['n'][agent.name] = self._get_info(agent)
-            
-        # All agents get total reward in cooperative case
+            done_n.append(self._get_done(agent))
+
+            info_n['n'].append(self._get_info(agent))
+
+        # all agents get total reward in cooperative case
+        reward = np.sum(reward_n)
         if self.shared_reward:
-            reward = np.sum(reward_n)
             reward_n = [reward] * self.n
 
-        return obs_n, reward_n, terminated_n, truncated_n, info_n
+        return obs_n, reward_n, done_n, info_n
 
     # Get info used for benchmarking
     def _get_info(self, agent) -> Dict:
@@ -251,8 +229,7 @@ class MultiAgentEnv(gym.Env):
     def _set_action(self, action, agent, action_space, time=None):
         agent.action.u = np.zeros(self.world.dim_p)
         agent.action.c = np.zeros(self.world.dim_c)
-        
-        # Process action
+        # process action
         if isinstance(action_space, MultiDiscrete):
             act = []
             size = action_space.high - action_space.low + 1
@@ -265,43 +242,40 @@ class MultiAgentEnv(gym.Env):
             action = [action]
 
         if agent.movable:
-            # Physical action
+            # physical action
             if self.discrete_action_input:
                 agent.action.u = np.zeros(self.world.dim_p)
-                # Process discrete action
+                # process discrete action
                 if action[0] == 1: agent.action.u[0] = -1.0
                 if action[0] == 2: agent.action.u[0] = +1.0
                 if action[0] == 3: agent.action.u[1] = -1.0
                 if action[0] == 4: agent.action.u[1] = +1.0
             else:
-                # Handle both list/array and scalar formats
-                if isinstance(action[0], (list, np.ndarray)):
-                    if self.force_discrete_action:
-                        d = np.argmax(action[0])
-                        action[0][:] = 0.0
-                        action[0][d] = 1.0
-                    if self.discrete_action_space:
-                        agent.action.u[0] += action[0][1] - action[0][2]
-                        agent.action.u[1] += action[0][3] - action[0][4]
-                    else:
-                        agent.action.u = action[0]
+                if self.force_discrete_action:
+                    d = np.argmax(action[0])
+                    action[0][:] = 0.0
+                    action[0][d] = 1.0
+                if self.discrete_action_space:
+                    agent.action.u[0] += action[0][1] - action[0][2]
+                    agent.action.u[1] += action[0][3] - action[0][4]
                 else:
-                    # Handle scalar action (like from Discrete action space)
-                    if self.discrete_action_space:
-                        # Convert scalar to appropriate format
-                        if action[0] == 1: agent.action.u[0] = -1.0
-                        if action[0] == 2: agent.action.u[0] = +1.0
-                        if action[0] == 3: agent.action.u[1] = -1.0
-                        if action[0] == 4: agent.action.u[1] = +1.0
-                    else:
-                        # Not sure how to handle this case - would need more context
-                        raise ValueError("Unexpected action format")
-                        
+                    agent.action.u = action[0]
             sensitivity = 5.0
             if agent.accel is not None:
                 sensitivity = agent.accel
             agent.action.u *= sensitivity
             action = action[1:]
+        if not agent.silent:
+            # communication action
+            if self.discrete_action_input:
+                agent.action.c = np.zeros(self.world.dim_c)
+                agent.action.c[action[0]] = 1.0
+            else:
+                agent.action.c = action[0]
+            action = action[1:]
+        # make sure we used all elements of action
+        assert len(action) == 0
+
 
     # Reset rendering assets
     def _reset_render(self):

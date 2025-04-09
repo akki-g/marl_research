@@ -257,7 +257,7 @@ def run_local_td_experiment(network_type='er'):
     env = make_env('simple_spread', benchmark=False)
     
     # Reset environment
-    obs_n = env.reset()
+    obs_n, _ = env.reset(seed=SEED)
     
     # Create consensus matrix based on network topology
     if network_type == 'ring':
@@ -334,11 +334,12 @@ def run_local_td_experiment(network_type='er'):
                 actions_n.append(np.concatenate([action, np.zeros(env.world.dim_c)]))
             
             # Step environment
-            next_obs_n, reward_n, done_n, _ = env.step(actions_n)
-            
+            next_obs_n, reward_n, term_n, trunc_n, _ = env.step(actions_n)
+            done_n = [term or trunc for term, trunc in zip(term_n, trunc_n)]
+
             # Reset environment if episode terminates
             if any(done_n):
-                obs_n = env.reset()
+                obs_n, _ = env.reset()
                 for i in range(NUM_AGENTS):
                     phi_reset = get_feature_vector(
                         obs_n[i], 
@@ -432,7 +433,7 @@ def run_topology_comparison():
     os.makedirs(SAVE_DIR, exist_ok=True)
     
     # Network topologies to test
-    network_types = ['ring', '4-regular', '6-regular', 'er', 'complete']
+    network_types = ['ring']
     results = {}
     
     # Run experiment for each network type

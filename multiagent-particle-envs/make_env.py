@@ -6,21 +6,13 @@ Can be called by using, for example:
     env = make_env('simple_spread')
 """
 
-from typing import Dict, Optional, Any
 import os
-import sys
 import importlib.util
 
 from multiagent.environment import MultiAgentEnv
 
 
-def make_env(
-    scenario_name: str,
-    benchmark: bool = False,
-    render_mode: Optional[str] = None,
-    max_cycles: int = 25,
-    **kwargs
-) -> MultiAgentEnv:
+def make_env(scenario_name, benchmark=False, render_mode=None, max_cycles=25):
     """
     Creates a MultiAgentEnv object as env. This can be used similar to a gymnasium
     environment by calling env.reset() and env.step().
@@ -53,8 +45,7 @@ def make_env(
             info_callback=scenario.benchmark_data,
             done_callback=getattr(scenario, "done", None),
             render_mode=render_mode,
-            max_cycles=max_cycles,
-            **kwargs
+            max_cycles=max_cycles
         )
     else:
         env = MultiAgentEnv(
@@ -64,8 +55,7 @@ def make_env(
             observation_callback=scenario.observation,
             done_callback=getattr(scenario, "done", None),
             render_mode=render_mode,
-            max_cycles=max_cycles,
-            **kwargs
+            max_cycles=max_cycles
         )
         
     return env
