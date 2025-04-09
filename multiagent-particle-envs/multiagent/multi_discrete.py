@@ -1,12 +1,8 @@
-# An old version of OpenAI Gym's multi_discrete.py. (Was getting affected by Gym updates)
-# (https://github.com/openai/gym/blob/1fb81d4e3fb780ccf77fec731287ba07da35eb84/gym/spaces/multi_discrete.py)
-
 import numpy as np
+import gymnasium as gym
+from gymnasium.spaces import Space
 
-import gym
-from gym.spaces import prng
-
-class MultiDiscrete(gym.Space):
+class MultiDiscrete(Space):
     """
     - The multi-discrete action space consists of a series of discrete action spaces with different parameters
     - It can be adapted to both a Discrete action space or a continuous (Box) action space
@@ -26,19 +22,29 @@ class MultiDiscrete(gym.Space):
         self.low = np.array([x[0] for x in array_of_param_array])
         self.high = np.array([x[1] for x in array_of_param_array])
         self.num_discrete_space = self.low.shape[0]
+        
+        # Define the shape and dtype for the space
+        super(MultiDiscrete, self).__init__(
+            shape=(self.num_discrete_space,),
+            dtype=np.int64
+        )
 
     def sample(self):
         """ Returns a array with one sample from each discrete action space """
         # For each row: round(random .* (max - min) + min, 0)
-        random_array = prng.np_random.rand(self.num_discrete_space)
-        return [int(x) for x in np.floor(np.multiply((self.high - self.low + 1.), random_array) + self.low)]
+        random_array = self.np_random.random(size=self.num_discrete_space)
+        return np.floor(np.multiply((self.high - self.low + 1.), random_array) + self.low).astype(self.dtype)
+        
     def contains(self, x):
-        return len(x) == self.num_discrete_space and (np.array(x) >= self.low).all() and (np.array(x) <= self.high).all()
+        if isinstance(x, list):
+            x = np.array(x)  # Promote list to array for contains check
+            
+        # Make sure we handle scalar x
+        x = np.array(x)
+        return x.shape == self.shape and np.all(x >= self.low) and np.all(x <= self.high)
 
-    @property
-    def shape(self):
-        return self.num_discrete_space
     def __repr__(self):
-        return "MultiDiscrete" + str(self.num_discrete_space)
+        return "MultiDiscrete({})".format(self.num_discrete_space)
+        
     def __eq__(self, other):
-        return np.array_equal(self.low, other.low) and np.array_equal(self.high, other.high)
+        return isinstance(other, MultiDiscrete) and np.array_equal(self.low, other.low) and np.array_equal(self.high, other.high)

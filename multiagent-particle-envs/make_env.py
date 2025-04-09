@@ -2,8 +2,8 @@
 Code for creating a multiagent environment with one of the scenarios listed
 in ./scenarios/.
 Can be called by using, for example:
-    env = make_env('simple_speaker_listener')
-After producing the env object, can be used similarly to an OpenAI gym
+    env = make_env('simple_spread')
+After producing the env object, can be used similarly to a gymnasium
 environment.
 
 A policy using this environment must output actions in the form of a list
@@ -14,7 +14,7 @@ communication actions in this array. See environment.py for more details.
 
 def make_env(scenario_name, benchmark=False):
     '''
-    Creates a MultiAgentEnv object as env. This can be used similar to a gym
+    Creates a MultiAgentEnv object as env. This can be used similar to a gymnasium
     environment by calling env.reset() and env.step().
     Use env.render() to view the environment on the screen.
 
@@ -31,14 +31,18 @@ def make_env(scenario_name, benchmark=False):
     '''
     from multiagent.environment import MultiAgentEnv
     import multiagent.scenarios as scenarios
-
-    # load scenario from script
+    import importlib
+    
+    # Load scenario module
     scenario = scenarios.load(scenario_name + ".py").Scenario()
-    # create world
+    
+    # Create world
     world = scenario.make_world()
-    # create multiagent environment
+    
+    # Create multiagent environment
     if benchmark:        
         env = MultiAgentEnv(world, scenario.reset_world, scenario.reward, scenario.observation, scenario.benchmark_data)
     else:
         env = MultiAgentEnv(world, scenario.reset_world, scenario.reward, scenario.observation)
+    
     return env

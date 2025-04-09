@@ -16,9 +16,9 @@ from make_env import make_env
 SEED = 42  # Random seed for reproducibility
 L = 200    # Number of communication rounds
 K = 50     # Number of local TD-update steps
-BETA = 0.1  # Step size parameter
-NUM_AGENTS = 3
-NUM_LANDMARKS = 3
+BETA = 0.1 # Step size parameter
+NUM_AGENTS = 9
+NUM_LANDMARKS = 9
 FEAT_NORMALIZATION = 'l2'
 INIT_SCALE = 0.01
 SAVE_DIR = "results_local_td"
@@ -102,34 +102,48 @@ def verify_doubly_stochastic(A, tol=1e-6):
     return row_check and col_check
 
 # -------------------- Feature Extraction --------------------
-def get_feature_vector(obs, num_agents=NUM_AGENTS, num_landmarks=NUM_LANDMARKS, normalization='l2'):
-    """
-    Extract features from observation.
-    For simple_spread, the observation includes:
-      - Agent's velocity (2D)
-      - Agent's position (2D)
-      - Landmark relative positions (2D for each landmark)
-      - Other agents' relative positions (2D for each other agent)
-    
-    Returns a normalized feature vector.
-    """
-    # Simple spread observation structure:
-    # [vel_x, vel_y, pos_x, pos_y, landmark1_rel_x, landmark1_rel_y, ..., agent1_rel_x, agent1_rel_y, ...]
-    
-    # We'll use the entire observation as the feature vector
-    feature_vector = np.array(obs, dtype=np.float32)
-    
-    # Normalize feature vector
-    if normalization == 'l1':
-        norm = np.linalg.norm(feature_vector, ord=1)
-        if norm > 0:
-            feature_vector = feature_vector / norm
-    elif normalization == 'l2':
-        norm = np.linalg.norm(feature_vector, ord=2)
-        if norm > 0:
-            feature_vector = feature_vector / norm
-    
-    return feature_vector
+def get_feature_vector(obs, num_agents=9, num_landmarks=9, normalization='l2'):
+     """
+     Constructs the feature vector φ(s) for an agent based on its observation.
+     For simple_spread_v3, the observation is assumed to be arranged as:
+       [self_vel (2), self_pos (2), landmark_rel_positions (num_landmarks*2),
+        other_agents_rel_positions ((num_agents-1)*2), communication (remaining dims)]
+     We ignore communication and extract:
+       - self_pos = obs[2:4]
+       - landmark_rel_pos = obs[4:4+2*num_landmarks]
+       - other_agents_rel_pos = obs[4+2*num_landmarks : 4+2*num_landmarks+2*(num_agents-1)]
+     For num_agents=9 and num_landmarks=9, this gives 2+18+16 = 36 dims.
+     The resulting vector is normalized.
+     Extract features from the observation as described in the paper:
+     - Agent's own position (2 dims)
+     - Landmark relative positions (num_landmarks * 2 dims)
+     - Other agents' relative positions ((num_agents-1) * 2 dims)
+     """
+     agent_pos = obs[2:4]
+     agent_pos = obs[2:4]  # Self position (2D)
+     
+     # Landmark relative positions
+     start_landmark = 4
+     end_landmark = start_landmark + num_landmarks * 2
+     landmark_rel_pos = obs[start_landmark:end_landmark]
+     # Extract other agents relative positions (ignoring communication)
+     
+     # Other agents' relative positions
+     other_agents_rel_pos = obs[end_landmark:end_landmark + (num_agents - 1) * 2]
+     
+     # Concatenate all features
+     feature_vector = np.concatenate([agent_pos, landmark_rel_pos, other_agents_rel_pos])
+     
+     # Normalize the feature vector (using L1 norm as per the paper)
+     if normalization == 'l1':
+            norm = np.linalg.norm(feature_vector, ord=1)
+     elif normalization == 'l2':
+            norm = np.linalg.norm(feature_vector, ord=2)
+
+     if norm > 0:
+         feature_vector = feature_vector / norm
+         
+     return feature_vector
 
 # -------------------- Error Metrics --------------------
 def calculate_consensus_error(weights):
@@ -351,7 +365,7 @@ def run_local_td_experiment(network_type='er'):
             
             # Perform local TD updates for all agents
             sample_data = {}
-            print(next_obs_n)
+            
             for i in range(NUM_AGENTS):
                 # Get feature vectors
                 phi_s = agents[i].prev_phi
