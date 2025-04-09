@@ -1,9 +1,11 @@
-numpy
-pettingzoo
-matplotlib
-scipy
-pygame
-torch
-supersuit
-imageio
-tqdm
+# Core dependencies
+gymnasium>=0.27.0     # Successor to OpenAI Gym
+numpy>=1.23.0         # Numerical computations
+pyglet>=2.0.0         # Rendering/visualization
+pyyaml>=6.0           # Configuration and data serialization
+typing-extensions>=4.0.0  # Advanced type hints
+
+# Development dependencies (optional)
+pytest>=7.0.0         # Testing
+black>=23.0.0         # Code formatting
+mypy>=1.0.0           # Type checking
