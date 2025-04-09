@@ -12,9 +12,9 @@ class EntityState:
     
     def __init__(self) -> None:
         # physical position
-        self.p_pos: Optional[NDArray[np.float_]] = None
+        self.p_pos: Optional[NDArray[np.float64]] = None
         # physical velocity
-        self.p_vel: Optional[NDArray[np.float_]] = None
+        self.p_vel: Optional[NDArray[np.float64]] = None
 
 
 class AgentState(EntityState):
@@ -23,7 +23,7 @@ class AgentState(EntityState):
     def __init__(self) -> None:
         super().__init__()
         # communication utterance
-        self.c: Optional[NDArray[np.float_]] = None
+        self.c: Optional[NDArray[np.float64]] = None
 
 
 class Action:
@@ -31,9 +31,9 @@ class Action:
     
     def __init__(self) -> None:
         # physical action
-        self.u: Optional[NDArray[np.float_]] = None
+        self.u: Optional[NDArray[np.float64]] = None
         # communication action
-        self.c: Optional[NDArray[np.float_]] = None
+        self.c: Optional[NDArray[np.float64]] = None
 
 
 class Entity:
@@ -51,7 +51,7 @@ class Entity:
         # material density (affects mass)
         self.density: float = 25.0
         # color
-        self.color: Optional[NDArray[np.float_]] = None
+        self.color: Optional[NDArray[np.float64]] = None
         # max speed and acceleration
         self.max_speed: Optional[float] = None
         self.accel: Optional[float] = None
@@ -162,7 +162,7 @@ class World:
         for agent in self.agents:
             self.update_agent_state(agent)
 
-    def apply_action_force(self, p_force: List[Optional[NDArray[np.float_]]]) -> List[Optional[NDArray[np.float_]]]:
+    def apply_action_force(self, p_force: List[Optional[NDArray[np.float64]]]) -> List[Optional[NDArray[np.float64]]]:
         """Gather agent action forces"""
         # set applied forces
         for i, agent in enumerate(self.agents):
@@ -171,7 +171,7 @@ class World:
                 p_force[i] = agent.action.u + noise                
         return p_force
 
-    def apply_environment_force(self, p_force: List[Optional[NDArray[np.float_]]]) -> List[Optional[NDArray[np.float_]]]:
+    def apply_environment_force(self, p_force: List[Optional[NDArray[np.float64]]]) -> List[Optional[NDArray[np.float64]]]:
         """Gather physical forces acting on entities"""
         # simple (but inefficient) collision response
         for a, entity_a in enumerate(self.entities):
@@ -193,7 +193,7 @@ class World:
                     
         return p_force
 
-    def integrate_state(self, p_force: List[Optional[NDArray[np.float_]]]) -> None:
+    def integrate_state(self, p_force: List[Optional[NDArray[np.float64]]]) -> None:
         """Integrate physical state"""
         for i, entity in enumerate(self.entities):
             if not entity.movable:
@@ -219,7 +219,7 @@ class World:
             noise = np.random.randn(*agent.action.c.shape) * agent.c_noise if agent.c_noise else 0.0
             agent.state.c = agent.action.c + noise
 
-    def get_collision_force(self, entity_a: Entity, entity_b: Entity) -> Tuple[Optional[NDArray[np.float_]], Optional[NDArray[np.float_]]]:
+    def get_collision_force(self, entity_a: Entity, entity_b: Entity) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
         """Get collision forces for any contact between two entities"""
         if (not entity_a.collide) or (not entity_b.collide):
             return [None, None]  # not a collider

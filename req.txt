@@ -9,3 +9,8 @@ typing-extensions>=4.0.0  # Advanced type hints
 pytest>=7.0.0         # Testing
 black>=23.0.0         # Code formatting
 mypy>=1.0.0           # Type checking
+
+torch
+matplotlib
+networkx
+tqdm

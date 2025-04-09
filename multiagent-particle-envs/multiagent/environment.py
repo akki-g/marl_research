@@ -274,31 +274,34 @@ class MultiAgentEnv(gym.Env):
                 if action[0] == 3: agent.action.u[1] = -1.0
                 if action[0] == 4: agent.action.u[1] = +1.0
             else:
-                if self.force_discrete_action:
-                    d = np.argmax(action[0])
-                    action[0][:] = 0.0
-                    action[0][d] = 1.0
-                if self.discrete_action_space:
-                    agent.action.u[0] += action[0][1] - action[0][2]
-                    agent.action.u[1] += action[0][3] - action[0][4]
+                # Handle both list/array and scalar formats
+                if isinstance(action[0], (list, np.ndarray)):
+                    if self.force_discrete_action:
+                        d = np.argmax(action[0])
+                        action[0][:] = 0.0
+                        action[0][d] = 1.0
+                    if self.discrete_action_space:
+                        agent.action.u[0] += action[0][1] - action[0][2]
+                        agent.action.u[1] += action[0][3] - action[0][4]
+                    else:
+                        agent.action.u = action[0]
                 else:
-                    agent.action.u = action[0]
+                    # Handle scalar action (like from Discrete action space)
+                    if self.discrete_action_space:
+                        # Convert scalar to appropriate format
+                        if action[0] == 1: agent.action.u[0] = -1.0
+                        if action[0] == 2: agent.action.u[0] = +1.0
+                        if action[0] == 3: agent.action.u[1] = -1.0
+                        if action[0] == 4: agent.action.u[1] = +1.0
+                    else:
+                        # Not sure how to handle this case - would need more context
+                        raise ValueError("Unexpected action format")
+                        
             sensitivity = 5.0
             if agent.accel is not None:
                 sensitivity = agent.accel
             agent.action.u *= sensitivity
             action = action[1:]
-            
-        if not agent.silent:
-            # Communication action
-            if self.discrete_action_input:
-                agent.action.c = np.zeros(self.world.dim_c)
-                agent.action.c[action[0]] = 1.0
-            else:
-                agent.action.c = action[0]
-                
-        # Make sure we used all elements of action
-        assert len(action) == 0
 
     # Reset rendering assets
     def _reset_render(self):

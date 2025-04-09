@@ -29,8 +29,8 @@ class Scenario(BaseScenario):
         
         # Set world properties
         world.dim_c = 2  # communication channel dimensionality
-        num_agents = 3
-        num_landmarks = 3
+        num_agents = 9
+        num_landmarks = 9
         world.collaborative = True
         
         # Add agents
