@@ -1,25 +1,32 @@
-"""
-Multi-Agent Particle Environment
+import os
+import warnings
 
-A modernized version of the OpenAI Multi-Agent Particle Environment.
-"""
+from gym.envs.registration import register
 
-__version__ = '0.1.0'
+# Multiagent envs
+# ----------------------------------------
 
-from typing import Dict, List
+register(
+    id='MultiagentSimple-v0',
+    entry_point='multiagent.envs:SimpleEnv',
+    # FIXME(cathywu) currently has to be exactly max_path_length parameters in
+    # rllab run script
+    max_episode_steps=100,
+)
 
-# Dictionary mapping scenario names to their file names
-SCENARIOS: Dict[str, str] = {
-    'simple': 'simple.py',
-    'simple_adversary': 'simple_adversary.py',
-    'simple_crypto': 'simple_crypto.py',
-    'simple_push': 'simple_push.py',
-    'simple_reference': 'simple_reference.py',
-    'simple_speaker_listener': 'simple_speaker_listener.py',
-    'simple_spread': 'simple_spread.py',
-    'simple_tag': 'simple_tag.py',
-    'simple_world_comm': 'simple_world_comm.py',
-}
+register(
+    id='MultiagentSimpleSpeakerListener-v0',
+    entry_point='multiagent.envs:SimpleSpeakerListenerEnv',
+    max_episode_steps=100,
+)
 
-# List of all available scenarios
-AVAILABLE_SCENARIOS: List[str] = list(SCENARIOS.keys())
+warnings.warn("This code base is no longer maintained, and is not expected to be maintained again in the future. \n"
+              "For the past handful of years, these environments been maintained inside of PettingZoo (see "
+              "https://pettingzoo.farama.org/environments/mpe/). \nThis maintained version includes documentation, "
+              "support for the PettingZoo API, support for current versions of Python, numerous bug fixes, \n"
+              "support for installation via pip, and numerous other large quality of life improvements. \nWe "
+              "encourage researchers to switch to this maintained version for all purposes other than comparing "
+              "to results run on this version of the environments. \n")
+
+if os.getenv('SUPPRESS_MA_PROMPT') != '1':
+    input("Please read the raised warning, then press Enter to continue... (to suppress this prompt, please set the environment variable `SUPPRESS_MA_PROMPT=1`)\n")

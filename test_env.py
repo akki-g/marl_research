@@ -47,7 +47,7 @@ def run_episode(
         Tuple of (rewards, steps, collisions, success)
     """
     # Reset the environment
-    observations, _ = env.reset(seed=seed)
+    observations = env.reset()
     
     # Initialize metrics
     episode_rewards = [0.0 for _ in range(env.n)]
@@ -110,7 +110,7 @@ def test_environment(
         seed: Random seed for reproducibility
     """
     print("Creating simple_spread environment...")
-    env = make_env("simple_spread", render_mode="human" if render else None, max_cycles=max_steps)
+    env = make_env("simple_spread", benchmark=False)
     
     print(f"Environment created with {env.n} agents and {len(env.world.landmarks)} landmarks")
     print(f"Action spaces: {env.action_space}")
