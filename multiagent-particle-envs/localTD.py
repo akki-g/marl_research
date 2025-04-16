@@ -29,17 +29,27 @@ def set_seeds(seed):
     np.random.seed(seed)
 
 # -------------------- Network Topology Functions --------------------
-def generate_ring_network(N):
+def generate_ring_matrix(N, diag=0.4, off_diag=0.3):
     """
-    Generate a ring network as described in the paper:
-    - Self weight: 0.4
-    - Neighbor weights: 0.3 each
+    Generates a ring consensus matrix for N agents.
+    For agent 0, neighbors: agent 1 and agent N-1.
+    For agent i (1 <= i <= N-2): neighbors: i-1 and i+1.
+    For agent N-1, neighbors: agent N-2 and agent 0.
     """
     A = np.zeros((N, N))
-    for i in range(N):
-        A[i, i] = 0.4  # Self weight
-        A[i, (i-1) % N] = 0.3  # Left neighbor
-        A[i, (i+1) % N] = 0.3  # Right neighbor
+    if N == 1:
+        A[0,0] = 1.0
+        return A
+    A[0,0] = diag
+    A[0,1] = off_diag
+    A[0,N-1] = off_diag
+    for i in range(1, N-1):
+        A[i,i] = diag
+        A[i,i-1] = off_diag
+        A[i,i+1] = off_diag
+    A[N-1,N-1] = diag
+    A[N-1,N-2] = off_diag
+    A[N-1,0] = off_diag
     return A
 
 def generate_regular_network(N, degree, self_weight=0.4):
@@ -59,29 +69,29 @@ def generate_regular_network(N, degree, self_weight=0.4):
             
     return A
 
-def generate_erdos_renyi_network(N, p=0.5, self_weight=0.4):
-    """Generate an Erdos-Renyi network with connection probability p"""
-    # Set seed for NetworkX to ensure reproducibility
-    G = nx.erdos_renyi_graph(N, p, seed=SEED)
+def generate_ER_matrix(N, p=0.5):
+    """
+    Generates a consensus matrix A for N agents based on an Erdos–Rényi (ER) graph with connection probability p.
+    Using a simple Metropolis–Hastings rule:
+      For i ≠ j, if an edge exists: A[i,j] = 1 / (1 + max{deg(i), deg(j)}),
+      Then A[i,i] = 1 - ∑₍j ≠ i₎ A[i,j].
+    Returns:
+        A: torch.Tensor of shape (N, N)
+    """
     A = np.zeros((N, N))
-    
-    # Set weights
     for i in range(N):
-        neighbors = list(G.neighbors(i))
-        degree = len(neighbors)
-        
-        # If node has no neighbors, set self-loop to 1
-        if degree == 0:
-            A[i, i] = 1.0
-            continue
-            
-        # Otherwise, distribute weights
-        edge_weight = (1.0 - self_weight) / degree
-        A[i, i] = self_weight
-        for j in neighbors:
-            A[i, j] = edge_weight
-            
-    return A
+        for j in range(i+1, N):
+            if np.random.rand() < p:
+                A[i, j] = 1
+                A[j, i] = 1
+    degrees = A.sum(axis=1)
+    W = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i != j and A[i, j] > 0:
+                W[i, j] = 1.0 / (1.0 + max(degrees[i], degrees[j]))
+        W[i, i] = 1.0 - W[i].sum()
+    return W
 
 def generate_complete_network(N):
     """
@@ -275,13 +285,13 @@ def run_local_td_experiment(network_type='er'):
     
     # Create consensus matrix based on network topology
     if network_type == 'ring':
-        A_consensus = generate_ring_network(NUM_AGENTS)
+        A_consensus = generate_ring_matrix(NUM_AGENTS)
     elif network_type == '4-regular':
         A_consensus = generate_regular_network(NUM_AGENTS, 4)
     elif network_type == '6-regular':
         A_consensus = generate_regular_network(NUM_AGENTS, 6)
     elif network_type == 'er':
-        A_consensus = generate_erdos_renyi_network(NUM_AGENTS, p=0.5)
+        A_consensus = generate_ER_matrix(NUM_AGENTS, p=0.5)
     elif network_type == 'complete':
         A_consensus = generate_complete_network(NUM_AGENTS)
     else:

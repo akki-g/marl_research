@@ -1,484 +1,266 @@
+
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
-import os
-import time
-import networkx as nx
-from tqdm import tqdm
-import sys
+from pettingzoo.mpe import simple_spread_v3
+import imageio  
 
-# Add path to import from multiagent-particle-envs
-sys.path.append('.')  # Assuming we're running from the project root
 
-# Import from multiagent-particle-envs
-from make_env import make_env
-
-# -------------------- Constants and Configuration --------------------
-SEED = 42  # Random seed for reproducibility
-L = 200    # Number of communication rounds
-K = 50     # Number of local TD-update steps
-BETA = 0.1  # Step size parameter
-NUM_AGENTS = 3
-NUM_LANDMARKS = 3
-FEAT_NORMALIZATION = 'l2'
-INIT_SCALE = 0.01
-SAVE_DIR = "results_local_td"
-
-# -------------------- Set Random Seeds --------------------
-def set_seeds(seed):
-    """Set random seeds for reproducibility"""
-    np.random.seed(seed)
-
-# -------------------- Network Topology Functions --------------------
-def generate_ring_network(N):
-    """
-    Generate a ring network as described in the paper:
-    - Self weight: 0.4
-    - Neighbor weights: 0.3 each
-    """
-    A = np.zeros((N, N))
-    for i in range(N):
-        A[i, i] = 0.4  # Self weight
-        A[i, (i-1) % N] = 0.3  # Left neighbor
-        A[i, (i+1) % N] = 0.3  # Right neighbor
-    return A
-
-def generate_regular_network(N, degree, self_weight=0.4):
-    """Generate a k-regular network with specified degree"""
-    # Set seed for NetworkX to ensure reproducibility
-    G = nx.random_regular_graph(degree, N, seed=SEED)
-    A = np.zeros((N, N))
-    
-    # Calculate edge weight based on degree
-    edge_weight = (1.0 - self_weight) / degree
-    
-    # Set weights
-    for i in range(N):
-        A[i, i] = self_weight
-        for j in list(G.neighbors(i)):
-            A[i, j] = edge_weight
-            
-    return A
-
-def generate_erdos_renyi_network(N, p=0.5, self_weight=0.4):
-    """Generate an Erdos-Renyi network with connection probability p"""
-    # Set seed for NetworkX to ensure reproducibility
-    G = nx.erdos_renyi_graph(N, p, seed=SEED)
-    A = np.zeros((N, N))
-    
-    # Set weights
-    for i in range(N):
-        neighbors = list(G.neighbors(i))
-        degree = len(neighbors)
-        
-        # If node has no neighbors, set self-loop to 1
-        if degree == 0:
-            A[i, i] = 1.0
-            continue
-            
-        # Otherwise, distribute weights
-        edge_weight = (1.0 - self_weight) / degree
-        A[i, i] = self_weight
-        for j in neighbors:
-            A[i, j] = edge_weight
-            
-    return A
-
-def generate_complete_network(N):
-    """
-    Generate a complete network where every node is connected to every other node
-    with equal weight 1/N
-    """
-    A = np.ones((N, N)) / N
-    return A
-
-def verify_doubly_stochastic(A, tol=1e-6):
-    """Verify that a matrix is doubly stochastic (rows and columns sum to 1)"""
-    row_sums = A.sum(axis=1)
-    col_sums = A.sum(axis=0)
-    
-    row_check = np.allclose(row_sums, 1.0, atol=tol)
-    col_check = np.allclose(col_sums, 1.0, atol=tol)
-    
-    return row_check and col_check
+# -------------------- Device Setup --------------------
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda")
+print("Using device:", device)
 
 # -------------------- Feature Extraction --------------------
-def get_feature_vector(obs, num_agents=NUM_AGENTS, num_landmarks=NUM_LANDMARKS, normalization='l2'):
+def get_feature_vector(obs, num_agents=9, num_landmarks=9):
     """
-    Extract features from observation.
-    For simple_spread, the observation includes:
-      - Agent's velocity (2D)
-      - Agent's position (2D)
-      - Landmark relative positions (2D for each landmark)
-      - Other agents' relative positions (2D for each other agent)
-    
-    Returns a normalized feature vector.
+    Constructs the feature vector φ(s) for an agent based on its observation.
+    For simple_spread_v3, the observation is assumed to be arranged as:
+      [self_vel (2), self_pos (2), landmark_rel_positions (num_landmarks*2),
+       other_agents_rel_positions ((num_agents-1)*2), communication (remaining dims)]
+    We ignore communication and extract:
+      - self_pos = obs[2:4]
+      - landmark_rel_pos = obs[4:4+2*num_landmarks]
+      - other_agents_rel_pos = obs[4+2*num_landmarks : 4+2*num_landmarks+2*(num_agents-1)]
+    For num_agents=9 and num_landmarks=9, this gives 2+18+16 = 36 dims.
+    The resulting vector is normalized.
     """
-    # Simple spread observation structure:
-    # [vel_x, vel_y, pos_x, pos_y, landmark1_rel_x, landmark1_rel_y, ..., agent1_rel_x, agent1_rel_y, ...]
-    
-    # We'll use the entire observation as the feature vector
-    feature_vector = np.array(obs, dtype=np.float32)
-    
-    # Normalize feature vector
-    if normalization == 'l1':
-        norm = np.linalg.norm(feature_vector, ord=1)
-        if norm > 0:
-            feature_vector = feature_vector / norm
-    elif normalization == 'l2':
-        norm = np.linalg.norm(feature_vector, ord=2)
-        if norm > 0:
-            feature_vector = feature_vector / norm
-    
+    agent_pos = obs[2:4]
+    start_landmark = 4
+    end_landmark = start_landmark + num_landmarks * 2
+    landmark_rel_pos = obs[start_landmark:end_landmark]
+    # Extract other agents relative positions (ignoring communication)
+    other_agents_rel_pos = obs[end_landmark:end_landmark + (num_agents - 1) * 2]
+    feature_vector = np.concatenate([agent_pos, landmark_rel_pos, other_agents_rel_pos])
+    norm = np.linalg.norm(feature_vector)
+    if norm > 0:
+        feature_vector = feature_vector / norm
     return feature_vector
 
 # -------------------- Error Metrics --------------------
 def calculate_consensus_error(weights):
     """
-    Calculate consensus error across agents:
-    CE = (1/N) * sum_i ||w_i - w_bar||^2
+    Computes the consensus error:
+      ConsensusError = (1/N) ∑_{i=1}^N ||w_i - w̄||²,
+    where w̄ is the average weight vector.
     """
     agent_ids = list(weights.keys())
     N = len(agent_ids)
     if N == 0:
         return 0.0
-        
-    W = np.stack([weights[agent] for agent in agent_ids])
-    w_bar = np.mean(W, axis=0)
-    errors = np.sum((W - w_bar)**2, axis=1)
-    
-    return np.mean(errors)
+    W = torch.stack([weights[agent] for agent in agent_ids], dim=0)
+    w_bar = torch.mean(W, dim=0)
+    consensus_error = torch.mean(torch.sum((W - w_bar) ** 2, dim=1))
+    return consensus_error.item()
 
 def calculate_SBE(sample_data):
     """
-    Calculate Squared Bellman Error:
-    SBE = (1/N) * sum_i (phi(s)^T*w_i + mu_bar - r_bar - phi(s')^T*w_i)^2
+    Computes the instantaneous squared Bellman error (SBE) for a sample update.
+    For each agent i, define:
+      error_i = φ(s)ᵀw_i + μ̄ - r̄ - φ(s')ᵀw_i,
+    where r̄ and μ̄ are the averages over agents.
+    SBE = (1/N) ∑_{i=1}^N error_i².
     """
     agent_ids = list(sample_data.keys())
     N = len(agent_ids)
     if N == 0:
         return 0.0
-        
-    # Calculate average reward and average value estimation
     r_bar = sum(sample_data[agent]['reward'] for agent in agent_ids) / N
     mu_bar = sum(sample_data[agent]['mu'] for agent in agent_ids) / N
-    
-    total_error = 0.0
+    errors = []
     for agent in agent_ids:
         w = sample_data[agent]['w']
         phi_s = sample_data[agent]['phi_s']
         phi_s_next = sample_data[agent]['phi_s_next']
-        
-        # Calculate TD target
-        value_current = np.dot(phi_s, w)
-        value_next = np.dot(phi_s_next, w)
-        
-        # Calculate Bellman error
-        bellman_error = value_current + mu_bar - r_bar - value_next
-        squared_error = bellman_error ** 2
-        
-        total_error += squared_error
-    
-    return total_error / N
+        value_current = torch.dot(phi_s.t(), w)
+        value_next = torch.dot(phi_s_next.t(), w)
+        error = value_current + mu_bar - r_bar - value_next
+        errors.append(error ** 2)
+    SBE = sum(errors) / N
+    return SBE.item()
 
-# -------------------- Agent Model --------------------
-class LocalTDAgent:
-    """Agent implementing the Local TD update from Algorithm 1"""
-    def __init__(self, agent_id, feat_dim, init_scale=INIT_SCALE):
-        self.agent_id = agent_id
-        
-        # Initialize weights with small random values as in the paper
-        self.w = np.random.randn(feat_dim) * init_scale
-        
-        # Initialize average reward estimate to 0
-        self.mu = 0.0
-        
-        # Previous feature vector (for storing between steps)
-        self.prev_phi = None
-        
-    def update(self, phi_s, phi_s_next, reward, beta):
-        """
-        Perform local TD update using current transition
-        
-        Args:
-            phi_s: Feature vector for current state
-            phi_s_next: Feature vector for next state
-            reward: Reward received
-            beta: Step size parameter
-            
-        Returns:
-            Dictionary with update information
-        """
-        # Calculate current state value
-        value_current = np.dot(phi_s, self.w)
-        
-        # Calculate next state value
-        value_next = np.dot(phi_s_next, self.w)
-        
-        # Calculate TD error: δ = r - μ + φ(s')ᵀw - φ(s)ᵀw
-        delta = reward - self.mu + value_next - value_current
-        
-        # Update average reward estimate: μ = (1-β)μ + βr
-        self.mu = (1 - beta) * self.mu + beta * reward
-        
-        # Update weight vector: w = w + βδφ(s)
-        self.w = self.w + beta * delta * phi_s
-        
-        # Return relevant data for metrics calculation
-        return {
-            'phi_s': phi_s,
-            'phi_s_next': phi_s_next,
-            'reward': reward,
-            'mu': self.mu,
-            'w': self.w,
-            'delta': delta
-        }
-
-# -------------------- Main Algorithm --------------------
-def run_local_td_experiment(network_type='er'):
+# -------------------- Consensus Matrix --------------------
+def generate_ring_matrix(N, diag=0.4, off_diag=0.3):
     """
-    Run Local TD experiment following Algorithm 1 from the paper
-    
-    Args:
-        network_type: Type of network topology to use
-        
+    Generates a ring consensus matrix for N agents.
+    For agent 0, neighbors: agent 1 and agent N-1.
+    For agent i (1 <= i <= N-2): neighbors: i-1 and i+1.
+    For agent N-1, neighbors: agent N-2 and agent 0.
+    """
+    A = np.zeros((N, N))
+    if N == 1:
+        A[0,0] = 1.0
+        return torch.tensor(A, dtype=torch.float32)
+    A[0,0] = diag
+    A[0,1] = off_diag
+    A[0,N-1] = off_diag
+    for i in range(1, N-1):
+        A[i,i] = diag
+        A[i,i-1] = off_diag
+        A[i,i+1] = off_diag
+    A[N-1,N-1] = diag
+    A[N-1,N-2] = off_diag
+    A[N-1,0] = off_diag
+    return torch.tensor(A, dtype=torch.float32)
+
+def generate_ER_matrix(N, p=0.5):
+    """
+    Generates a consensus matrix A for N agents based on an Erdos–Rényi (ER) graph with connection probability p.
+    Using a simple Metropolis–Hastings rule:
+      For i ≠ j, if an edge exists: A[i,j] = 1 / (1 + max{deg(i), deg(j)}),
+      Then A[i,i] = 1 - ∑₍j ≠ i₎ A[i,j].
     Returns:
-        Dictionary with experiment results
+        A: torch.Tensor of shape (N, N)
     """
-    # Create save directory
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    # Set random seeds for reproducibility
-    set_seeds(SEED)
-    
-    print(f"Starting experiment with {network_type} network topology")
-    print(f"Parameters: L={L}, K={K}, beta={BETA}, num_agents={NUM_AGENTS}")
-    
-    # Initialize environment
-    env = make_env('simple_spread', benchmark=False)
-    
-    # Reset environment
-    obs_n, _ = env.reset(seed=SEED)
-    
-    # Create consensus matrix based on network topology
-    if network_type == 'ring':
-        A_consensus = generate_ring_network(NUM_AGENTS)
-    elif network_type == '4-regular':
-        A_consensus = generate_regular_network(NUM_AGENTS, 4)
-    elif network_type == '6-regular':
-        A_consensus = generate_regular_network(NUM_AGENTS, 6)
-    elif network_type == 'er':
-        A_consensus = generate_erdos_renyi_network(NUM_AGENTS, p=0.5)
-    elif network_type == 'complete':
-        A_consensus = generate_complete_network(NUM_AGENTS)
-    else:
-        raise ValueError(f"Unknown network type: {network_type}")
-    
-    # Verify consensus matrix is doubly stochastic
-    if not verify_doubly_stochastic(A_consensus):
-        print(f"WARNING: Consensus matrix for {network_type} is not doubly stochastic!")
-    
-    # Initialize agents
-    # Get a sample observation to determine feature dimension
-    sample_obs = get_feature_vector(
-        obs_n[0], 
-        NUM_AGENTS, 
-        NUM_LANDMARKS,
-        normalization=FEAT_NORMALIZATION
+    A = np.zeros((N, N))
+    for i in range(N):
+        for j in range(i+1, N):
+            if np.random.rand() < p:
+                A[i, j] = 1
+                A[j, i] = 1
+    degrees = A.sum(axis=1)
+    W = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if i != j and A[i, j] > 0:
+                W[i, j] = 1.0 / (1.0 + max(degrees[i], degrees[j]))
+        W[i, i] = 1.0 - W[i].sum()
+    return torch.tensor(W, dtype=torch.float32)
+# -------------------- Agent Model --------------------
+class AgentModel:
+    """
+    Stores the learnable weight vector w, the running average reward μ,
+    and the previous feature vector φ(s).
+    The value function is approximated as V(s) = φ(s)ᵀw.
+    """
+    def __init__(self, agent_id, feat_dim, init_mu=0.0):
+        self.agent_id = agent_id
+        self.w = torch.ones(feat_dim, device=device, dtype=torch.float32)
+        self.mu = torch.tensor(init_mu, device=device, dtype=torch.float32)
+        self.prev_phi = None
+        self.delta_history = []
+
+# -------------------- Hyperparameters --------------------
+L = 500           # Number of communication rounds
+K = 20            # Number of local TD-update (sample) steps per round
+beta = 0.1        # Step size for the update
+num_agents = 9    # Number of agents (and landmarks)
+num_landmarks = num_agents  # For simple_spread, typically equal to number of agents
+A_consensus = generate_ring_matrix(num_agents).to(device)
+
+
+def localTD_updates():
+    # -------------------- Environment Setup --------------------
+    env = simple_spread_v3.parallel_env(
+        N=num_agents, local_ratio=0.5, max_cycles=10_000, 
+        continuous_actions=False, render_mode='rgb_array'
     )
-    feat_dim = sample_obs.shape[0]
+    obs, infos = env.reset(seed=42)  # Parallel API returns (obs, infos)
+
+    # Initialize each agent's model.
+    sample_phi = get_feature_vector(obs[env.agents[0]])
+    feat_dim = sample_phi.shape[0]
     print(f"Feature dimension: {feat_dim}")
-    
-    # Create a dictionary mapping agent indices to LocalTDAgent objects
-    agents = {
-        i: LocalTDAgent(i, feat_dim) 
-        for i in range(NUM_AGENTS)
-    }
-    
-    # Initialize feature vectors for each agent
-    for i, agent_obs in enumerate(obs_n):
-        phi_init = get_feature_vector(
-            agent_obs, 
-            NUM_AGENTS, 
-            NUM_LANDMARKS,
-            normalization=FEAT_NORMALIZATION
-        )
-        agents[i].prev_phi = phi_init
-    
-    # Metrics to track
+    agents_model = {agent: AgentModel(agent, feat_dim) for agent in env.agents}
+
+    # Set initial φ(s) for each agent.
+    for agent in env.agents:
+        phi_init = torch.tensor(get_feature_vector(obs[agent]),
+                                device=device, dtype=torch.float32)
+        agents_model[agent].prev_phi = phi_init
+
+    # -------------------- Main Loop --------------------
+    # We also keep a list of instantaneous SBE values, then compute the running average (MSBE) over history.
     sbe_history = []
-    msbe_running = []
-    consensus_error_history = []
-    
-    # Track total samples and communication rounds
-    total_samples = 0
-    
-    # Main experiment loop - following Algorithm 1
-    pbar = tqdm(total=L*K, desc=f"Local TD with {network_type} network")
-    start_time = time.time()
-    
+    msbe_running = []  # running average over sbe_history
+    consensus_per_sample = []
+    sample_count = 0
+    video_frames = []     
+    comm_snapshots = [] 
     for l in range(L):
-        # For each communication round
+        print(f"\n=== Communication Round {l} ===")
         for k in range(K):
-            # For each local TD update step
+            actions = {agent: int(env.action_space(agent).sample()) for agent in env.agents}
+            obs, rewards, dones, truncs, infos = env.step(actions)
             
-            # Select random actions - uniform random policy as in paper
-            actions_n = []
-            for i in range(NUM_AGENTS):
-                # Sample random action from the action space
-                # For simple_spread, actions are one-hot encoded for discrete movement
-                action = np.zeros(5)  # 5 actions: [no-op, left, right, up, down]
-                action_idx = np.random.choice(5)
-                action[action_idx] = 1
-                
-                # Add communication dimension (zeros since no communication)
-                actions_n.append(np.concatenate([action, np.zeros(env.world.dim_c)]))
+            if not env.agents:
+                print("No active agents; resetting environment.")
+                obs, infos = env.reset()
+                for agent in env.agents:
+                    phi_reset = torch.tensor(get_feature_vector(obs[agent]),
+                                            device=device, dtype=torch.float32)
+                    agents_model[agent].prev_phi = phi_reset
+                break
             
-            # Step environment
-            next_obs_n, reward_n, done_n, truncated_n, info_n = env.step(actions_n)
-
-            # Reset environment if episode terminates
-            if any(done_n):
-                obs_n, _ = env.reset()
-                for i in range(NUM_AGENTS):
-                    phi_reset = get_feature_vector(
-                        obs_n[i], 
-                        NUM_AGENTS, 
-                        NUM_LANDMARKS,
-                        normalization=FEAT_NORMALIZATION
-                    )
-                    agents[i].prev_phi = phi_reset
-                continue
-            
-            # Perform local TD updates for all agents
             sample_data = {}
-            print(next_obs_n)
-            for i in range(NUM_AGENTS):
-                # Get feature vectors
-                phi_s = agents[i].prev_phi
-                phi_s_next = get_feature_vector(
-                    next_obs_n[i], 
-                    NUM_AGENTS, 
-                    NUM_LANDMARKS,
-                    normalization=FEAT_NORMALIZATION
-                )
+            for agent in env.agents:
+                model = agents_model[agent]
+                phi_s = model.prev_phi
+                phi_s_next = torch.tensor(get_feature_vector(obs[agent]),
+                                            device=device, dtype=torch.float32)
+                value_current = torch.dot(phi_s.t(), model.w)
+                value_next = torch.dot(phi_s_next.t(), model.w)
+                r = torch.tensor(rewards[agent], device=device, dtype=torch.float32)
                 
-                # Get reward
-                reward = reward_n[i]
-                
-                # Update agent and store data for metrics
-                update_data = agents[i].update(phi_s, phi_s_next, reward, BETA)
-                sample_data[i] = update_data
-                
-                # Store next state feature
-                agents[i].prev_phi = phi_s_next
+                # TD error (average reward TD update):
+                delta = r - model.mu + value_next - value_current
+                model.delta_history.append(delta.item())
+                # Update running average reward: μ ← (1 - β) * μ + β * r.
+                model.mu = (1 - beta) * model.mu + beta * r
+                model.w = model.w + beta * delta * phi_s
+                sample_data[agent] = {
+                    'phi_s': phi_s,
+                    'phi_s_next': phi_s_next,
+                    'reward': r.item(),
+                    'mu': model.mu,
+                    'w': model.w
+                }
+                model.prev_phi = phi_s_next
+            instantaneous_sbe = calculate_SBE(sample_data)
+            sbe_history.append(instantaneous_sbe)
+            running_avg = np.mean(sbe_history)
+            msbe_running.append(running_avg)
+            frame = env.render()
+            video_frames.append(frame)
+            weights_dict = {agent: agents_model[agent].w for agent in env.agents}
+            cons_val = calculate_consensus_error(weights_dict)
+            consensus_per_sample.append(cons_val)
+            sample_count += 1
             
-            # Calculate metrics
-            sbe = calculate_SBE(sample_data)
-            sbe_history.append(sbe)
-            msbe_running.append(np.mean(sbe_history))
-            
-            # Calculate consensus error
-            weights_dict = {i: agents[i].w for i in range(NUM_AGENTS)}
-            consensus_error = calculate_consensus_error(weights_dict)
-            consensus_error_history.append(consensus_error)
-            
-            # Update observations for next step
-            obs_n = next_obs_n.copy()
-            
-            # Increment counter and update progress bar
-            total_samples += 1
-            pbar.update(1)
-        
-        # After K local updates, perform consensus - Line 12 in Algorithm 1
-        W = np.stack([agents[i].w for i in range(NUM_AGENTS)])
-        W_new = np.matmul(A_consensus, W)
-        
-        for i in range(NUM_AGENTS):
-            agents[i].w = W_new[i]
-    
-    # Close environment and progress bar
+        # Consensus update at end of communication round.
+        comm_snapshots.append(env.render())
+        all_agents = env.agents
+        if len(all_agents) > 0:
+            W = torch.stack([agents_model[agent].w for agent in all_agents], dim=0)
+            new_W = torch.matmul(A_consensus, W)
+            weights_dict = {agent: agents_model[agent].w for agent in all_agents}
+            cons_after = calculate_consensus_error(weights_dict)
+            # Append consensus error after consensus update (keeping MSBE same as last sample)
+            print(f"After Round {l}: Post-consensus consensus error = {cons_after:.4f}")
+
     env.close()
-    pbar.close()
-    
-    # Calculate elapsed time
-    elapsed_time = time.time() - start_time
-    print(f"Experiment completed in {elapsed_time:.2f} seconds")
-    
-    # Save metrics
-    results_path = os.path.join(SAVE_DIR, f"local_td_{network_type}_L{L}_K{K}_beta{BETA}")
-    np.save(f"{results_path}_msbe.npy", np.array(msbe_running))
-    np.save(f"{results_path}_consensus.npy", np.array(consensus_error_history))
-    
-    # Return results
-    return {
-        'msbe': msbe_running,
-        'consensus_error': consensus_error_history,
-        'params': {
-            'network': network_type,
-            'num_agents': NUM_AGENTS,
-            'num_landmarks': NUM_LANDMARKS,
-            'beta': BETA,
-            'L': L,
-            'K': K,
-            'feat_normalization': FEAT_NORMALIZATION,
-            'init_scale': INIT_SCALE
-        }
-    }
 
-# -------------------- Run Experiments on Different Topologies --------------------
-def run_topology_comparison():
-    """Run experiments with different network topologies and compare results"""
-    # Create save directory
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    # Network topologies to test
-    network_types = ['ring']
-    results = {}
-    
-    # Run experiment for each network type
-    for network in network_types:
-        print(f"\nRunning Local TD with {network} network (L={L}, K={K}, beta={BETA})")
-        
-        results[network] = run_local_td_experiment(network_type=network)
-    
-    # Plot comparison (like Figure 11 in the paper)
-    plt.figure(figsize=(10, 6))
-    
-    for network in network_types:
-        msbe = results[network]['msbe']
-        plt.plot(range(len(msbe)), msbe, label=f"{network.capitalize()} Network")
-    
-    plt.xlabel("Sample Number")
-    plt.ylabel("Mean Squared Bellman Error")
-    plt.title(f"Effect of Network Topology on MSBE (L={L}, K={K}, β={BETA})")
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.savefig(f"{SAVE_DIR}/topology_comparison_msbe.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Plot consensus error
-    plt.figure(figsize=(10, 6))
-    
-    for network in network_types:
-        consensus = results[network]['consensus_error']
-        plt.plot(range(len(consensus)), consensus, label=f"{network.capitalize()} Network")
-    
-    plt.xlabel("Sample Number")
-    plt.ylabel("Consensus Error")
-    plt.title(f"Effect of Network Topology on Consensus Error (L={L}, K={K}, β={BETA})")
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.savefig(f"{SAVE_DIR}/topology_comparison_consensus.png", dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    return results
+def save_video(frames, filename="local_ratio.mp4", fps=10):
+    imageio.mimwrite(filename, frames, fps=fps)
+    print(f"Video saved to {filename}")
 
-if __name__ == "__main__":
-    # Set random seeds for reproducibility
-    set_seeds(SEED)
-    
-    # Run experiments with different network topologies
-    print("\n============ Running Topology Comparison ============")
-    results = run_topology_comparison()
-    
-    print("Experiment completed!")
+def save_images(frames, prefix="comm_snapshot"):
+    for i, frame in enumerate(frames):
+        imageio.imwrite(f"{prefix}_{i:03d}.png", frame)
+    print(f"{len(frames)} images saved with prefix '{prefix}_'.")
+# -------------------- Plotting --------------------
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plt.plot(msbe_running, marker='.')
+plt.xlabel("Sample Update Step")
+plt.ylabel("MSBE")
+plt.title("Running MSBE per Sample Update (Average Reward)")
+
+plt.subplot(1,2,2)
+plt.plot(consensus_per_sample, marker='.', color='red')
+plt.xlabel("Sample Update Step")
+plt.ylabel("Consensus Error")
+plt.title("Consensus Error per Sample Update")
+plt.tight_layout()
+plt.show()
+
+save_video(video_frames)
