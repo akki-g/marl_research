@@ -2,12 +2,12 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from pettingzoo.mpe import simple_spread_v3
-import imageio 
 
-RUN_TYPE = input("What is the run env")
-if torch.backends.mps.is_avaliable():
+
+RUN_TYPE = input("What is the run env?\n")
+if torch.backends.mps.is_available():
     DEVICE = "mps"
-elif torch.cuda.is_avaliable():
+elif torch.cuda.is_available():
     DEVICE = "cuda"
 else:
     DEVICE = "cpu"
@@ -114,16 +114,15 @@ class LocalTD_Algorithm():
         return feat_vec
 
 
-    def calculuate_conseneus_error(self):
-
-        agents = self.agents
-        if len(self.agent == 0):
+    def conseneus_error_update(self):
+        if len(self.agents == 0):
             return 0.0
 
         W = torch.stack(self.agents[agent].w for agent in self.agents)
         w_bar = torch.mean(W, dim=0)
         consensus_error = torch.mean(torch.sum((W - w_bar) ** 2, dim=1))
-        return consensus_error.item()
+        self.consensus_history.append(consensus_error)
+        
     
     def consenus_update(self):
         W = torch.stack([self.agents[agent].w for agent in self.agents], dim=0)
@@ -155,7 +154,7 @@ class LocalTD_Algorithm():
             print(current_msbe)
         self.MSBE_history.append(current_msbe)
 
-    def local_td_update(self):
+    def run_local_td_update(self):
         for l in range(self.L):
 
             for k in range(self.K):
@@ -175,25 +174,46 @@ class LocalTD_Algorithm():
                     
                     sample_data[agent] = td_agent.update(phi_s_next=phi_s1, reward=rewards[agent], beta=self.beta)
                     td_agent.prev_phi = phi_s1
-            self.msbe_update(sample_data=sample_data)
+                self.msbe_update(sample_data=sample_data)
+                self.conseneus_error_update()
             self.consenus_update()
+        return self.consensus_history, self.MSBE_history
 
 
 
-        
+def run_maxCycles_comp(L, K, beta, numAgents):
+    numCycles = [20, 50, 100, 200, 10000]
+
+    for cycle in numCycles:
+        env = simple_spread_v3.parallel_env(
+            N=numAgents, local_ratio=0.5, max_cycles=cycle
+        )
+
+        localTD = LocalTD_Algorithm(env=env, L=L, K=K, beta=beta)
+        test_consensus, test_msbe = localTD.run_local_td_update()
+        env.close()
+
+def run_test():
+    env = simple_spread_v3.parallel_env(N=3, local_ratio=0.5, max_cycles=25)
+    localTD = LocalTD_Algorithm(env=env, L=500, K=20, beta=0.01)
+    consensus, msbe = localTD.run_local_td_update()
+    plt.figure(figsize=(12,5))
+    plt.subplot(1,2,1)
+    plt.plot(msbe, marker='.')
+    plt.xlabel("Sample Update Step")
+    plt.ylabel("MSBE")
+    plt.title("Running MSBE per Sample Update (Average Reward)")
+
+    plt.subplot(1,2,2)
+    plt.plot(consensus, marker='.', color='red')
+    plt.xlabel("Sample Update Step")
+    plt.ylabel("Consensus Error")
+    plt.title("Consensus Error per Sample Update")
+    plt.tight_layout()
+    plt.show()
 
 
+run_test()
 
 
-        
-
-
-
-
-
-
-
-
-
-        
     
